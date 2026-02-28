@@ -49,6 +49,9 @@ bootstrap = [
     "dep:enable-ansi-support",
 ]
 
+# CPU profiling via pprof-rs (separate HTTP server with flamegraph + protobuf output)
+profiling = ["dep:pprof"]
+
 [dependencies]
 # Project-local crates
 modkit-macros = { workspace = true }
@@ -118,6 +121,8 @@ tonic = { workspace = true, optional = true }
 # Unix-specific dependencies for graceful process termination
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["signal"] }
+# CPU profiling support (optional, Unix-only — pprof uses signals)
+pprof = { workspace = true, optional = true }
 
 [build-dependencies]
 zip = { version = "2.3", default-features = false, features = ["deflate"] }

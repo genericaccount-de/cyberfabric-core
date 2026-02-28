@@ -484,3 +484,6 @@ gts-macros = "0.8.2"
 
 # GTS validator
 gts-validator = "0.8.2"
+
+# CPU profiling (pprof-compatible)
+pprof = { version = "0.15", default-features = false, features = ["flamegraph", "prost-codec", "cpp"] }

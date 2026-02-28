@@ -141,7 +141,29 @@ async fn main() -> Result<()> {
 
     // Dispatch subcommands (default: run)
     match cli.command.as_ref().unwrap_or(&Commands::Run) {
-        Commands::Run => run_server(config).await,
+        Commands::Run => {
+            // Start profiling server before the main runtime (if enabled and compiled in)
+            #[cfg(all(unix, feature = "profiling"))]
+            let profiling_cancel = {
+                let cancel = tokio_util::sync::CancellationToken::new();
+                if config.tracing.profiling.enabled {
+                    modkit::telemetry::profiling::start_profiling_server(
+                        &config.tracing.profiling,
+                        cancel.clone(),
+                    )
+                    .await?;
+                }
+                cancel
+            };
+
+            let result = run_server(config).await;
+
+            // Cancel the profiling server when the main runtime exits
+            #[cfg(all(unix, feature = "profiling"))]
+            profiling_cancel.cancel();
+
+            result
+        }
         Commands::Check => check_config(&config),
         Commands::Migrate => run_migrate(config).await,
     }

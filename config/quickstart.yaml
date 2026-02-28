@@ -280,6 +280,14 @@ tracing:
   logs_correlation:
     inject_trace_ids_into_logs: true
 
+  # CPU profiling (requires --features profiling)
+  # Spawns a separate HTTP server with pprof-compatible endpoints.
+  profiling:
+    enabled: false
+    address: "127.0.0.1"
+    port: 6060
+    auth_token: "${PROFILING_TOKEN}"
+
 # Example configurations for different database scenarios:
 #
 # Example 1: PostgreSQL server with multiple modules
