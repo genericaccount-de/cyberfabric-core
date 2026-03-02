@@ -10,6 +10,8 @@ pub struct OagwConfig {
     pub proxy_timeout_secs: u64,
     #[serde(default = "default_max_body_size_bytes")]
     pub max_body_size_bytes: usize,
+    #[serde(default)]
+    pub allow_http_upstream: bool,
 }
 
 impl Default for OagwConfig {
@@ -17,6 +19,7 @@ impl Default for OagwConfig {
         Self {
             proxy_timeout_secs: default_proxy_timeout_secs(),
             max_body_size_bytes: default_max_body_size_bytes(),
+            allow_http_upstream: false,
         }
     }
 }
@@ -50,6 +53,7 @@ impl fmt::Debug for OagwConfig {
         f.debug_struct("OagwConfig")
             .field("proxy_timeout_secs", &self.proxy_timeout_secs)
             .field("max_body_size_bytes", &self.max_body_size_bytes)
+            .field("allow_http_upstream", &self.allow_http_upstream)
             .finish()
     }
 }

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use async_trait::async_trait;
 use modkit_macros::domain_model;
 use modkit_security::SecurityContext;
 
@@ -42,7 +43,7 @@ pub struct AuthContext {
 ///
 /// Implementations mutate [`AuthContext`] to inject authentication material
 /// (e.g., API keys, bearer tokens) into the outbound request headers.
-#[async_trait::async_trait]
+#[async_trait]
 pub trait AuthPlugin: Send + Sync {
     /// Apply authentication to the outbound request context.
     async fn authenticate(&self, ctx: &mut AuthContext) -> Result<(), PluginError>;

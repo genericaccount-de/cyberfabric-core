@@ -245,6 +245,7 @@ modules:
   oagw:
     config:
       proxy_timeout_secs: 2
+      allow_http_upstream: true
 
 # OpenTelemetry tracing configuration
 tracing:

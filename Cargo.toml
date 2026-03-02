@@ -330,6 +330,8 @@ hyper-rustls = { version = "0.27", default-features = false, features = [
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-native-certs = "0.8"
 rustls-pki-types = "1"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
+rcgen = { version = "0.13", default-features = false, features = ["aws_lc_rs", "pem"] }
 http-body-util = "0.1"
 http-body = "1"
 
@@ -344,8 +346,16 @@ parking_lot = "0.12"
 clap = { version = "4.5", features = ["derive"] }
 
 # Database utilities
+#
+# TLS note: sea-orm and sea-orm-migration use runtime-tokio (NOT runtime-tokio-rustls).
+# runtime-tokio-rustls would transitively activate sqlx/tls-rustls-ring, enabling
+# the `ring` crypto provider on rustls IN ADDITION to our aws-lc-rs.  With both
+# providers active, rustls 0.23 can no longer auto-detect and panics at runtime
+# in any code that calls ServerConfig::builder() without a prior
+# CryptoProvider::install_default() (e.g. tests).
+# TLS is provided separately via sqlx/tls-rustls-aws-lc-rs below.
 sea-orm = { version = "1.1", default-features = false, features = [
-    "runtime-tokio-rustls",
+    "runtime-tokio",
     "with-uuid",
     "with-chrono",
     "with-time",
@@ -354,10 +364,11 @@ sea-orm = { version = "1.1", default-features = false, features = [
     "macros",
 ] }
 sea-orm-migration = { version = "1.1", default-features = false, features = [
-    "runtime-tokio-rustls",
+    "runtime-tokio",
 ] }
-# sqlx: aws-lc-rs is the intended provider; runtime-tokio-rustls from sea-orm
-# also activates tls-rustls-ring via feature unification (unavoidable, harmless)
+# sqlx: TLS via aws-lc-rs; runtime-tokio for async.  This is the sole TLS entry
+# point for the DB stack -- sea-orm/sea-orm-migration intentionally use runtime-tokio
+# (not runtime-tokio-rustls) to avoid pulling in ring.
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs"] }
 
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
@@ -451,8 +462,8 @@ proc-macro-error2 = "2.0"
 
 # Testing utilities
 trybuild = "1"
-testcontainers = { version = "0.26", default-features = false, features = ["aws-lc-rs"] }
-testcontainers-modules = { version = "0.14", default-features = false, features = ["postgres", "mysql"] }
+testcontainers = { version = "0.27", default-features = false, features = ["aws-lc-rs"] }
+testcontainers-modules = { version = "0.15", default-features = false, features = ["aws-lc-rs", "postgres", "mysql"] }
 httpmock = "0.8"
 flate2 = "1"
 

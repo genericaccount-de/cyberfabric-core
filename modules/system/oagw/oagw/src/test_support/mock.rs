@@ -196,10 +196,15 @@ impl Drop for MockUpstream {
 impl MockUpstream {
     /// Start the mock server on `127.0.0.1:0` (random port).
     pub async fn start() -> Self {
+        Self::start_on("127.0.0.1:0").await
+    }
+
+    /// Start the mock server on a caller-chosen `addr` (e.g. `"127.0.0.2:0"`).
+    pub async fn start_on(addr: &str) -> Self {
         let state = Arc::new(SharedState::new(200));
         let app = Self::router(Arc::clone(&state));
 
-        let listener = TcpListener::bind("127.0.0.1:0")
+        let listener = TcpListener::bind(addr)
             .await
             .expect("failed to bind mock upstream");
         let addr = listener.local_addr().expect("failed to get local addr");

@@ -18,7 +18,8 @@ use oagw_sdk::api::ServiceGatewayClientV1;
 use uuid::Uuid;
 
 use crate::domain::services::{
-    ControlPlaneService, ControlPlaneServiceImpl, DataPlaneService, ServiceGatewayClientV1Facade,
+    ControlPlaneService, ControlPlaneServiceImpl, DataPlaneService, EndpointSelector,
+    ServiceGatewayClientV1Facade,
 };
 use crate::infra::proxy::DataPlaneServiceImpl;
 use crate::infra::storage::{InMemoryRouteRepo, InMemoryUpstreamRepo};
@@ -233,6 +234,9 @@ impl Default for TestCpBuilder {
 pub struct TestDpBuilder {
     request_timeout: Option<Duration>,
     authz_client: Option<Arc<dyn AuthZResolverClient>>,
+    backend_selector: Option<Arc<dyn EndpointSelector>>,
+    max_body_size: Option<usize>,
+    skip_upstream_tls_verify: bool,
 }
 
 impl TestDpBuilder {
@@ -241,6 +245,9 @@ impl TestDpBuilder {
         Self {
             request_timeout: None,
             authz_client: None,
+            backend_selector: None,
+            max_body_size: None,
+            skip_upstream_tls_verify: false,
         }
     }
 
@@ -255,6 +262,28 @@ impl TestDpBuilder {
     #[must_use]
     pub fn with_authz_client(mut self, client: Arc<dyn AuthZResolverClient>) -> Self {
         self.authz_client = Some(client);
+        self
+    }
+
+    /// Override the maximum request body size (useful for body-limit tests).
+    #[must_use]
+    pub fn with_max_body_size(mut self, size: usize) -> Self {
+        self.max_body_size = Some(size);
+        self
+    }
+
+    /// Skip upstream TLS certificate verification. **Test use only.**
+    #[must_use]
+    pub fn with_skip_upstream_tls_verify(mut self, allow: bool) -> Self {
+        self.skip_upstream_tls_verify = allow;
+        self
+    }
+
+    /// Inject a shared `EndpointSelector` so callers can hold the same
+    /// instance that the DP service uses (e.g. for `invalidate()` calls).
+    #[must_use]
+    pub(crate) fn with_backend_selector(mut self, selector: Arc<dyn EndpointSelector>) -> Self {
+        self.backend_selector = Some(selector);
         self
     }
 
@@ -274,10 +303,30 @@ impl TestDpBuilder {
             .unwrap_or_else(|| Arc::new(MockAuthZResolverClient));
         let policy_enforcer = PolicyEnforcer::new(authz_client);
 
-        let mut svc = DataPlaneServiceImpl::new(cp, credstore, policy_enforcer)
-            .expect("failed to build DataPlaneServiceImpl in test");
+        let server_conf = Arc::new(pingora_core::server::configuration::ServerConf::default());
+        let pingora_proxy = crate::infra::proxy::pingora_proxy::PingoraProxy::new(
+            Duration::from_secs(10),
+            Duration::from_secs(30),
+        )
+        .with_skip_upstream_tls_verify(self.skip_upstream_tls_verify);
+        let proxy = Arc::new(crate::infra::proxy::pingora_proxy::new_http_proxy(
+            &server_conf,
+            pingora_proxy,
+        ));
+
+        let backend_selector: Arc<dyn EndpointSelector> =
+            self.backend_selector.unwrap_or_else(|| {
+                Arc::new(crate::infra::proxy::pingora_proxy::PingoraEndpointSelector::new())
+            });
+
+        let mut svc =
+            DataPlaneServiceImpl::new(cp, credstore, policy_enforcer, backend_selector, proxy)
+                .with_allow_http_upstream(true);
         if let Some(timeout) = self.request_timeout {
             svc = svc.with_request_timeout(timeout);
+        }
+        if let Some(size) = self.max_body_size {
+            svc = svc.with_max_body_size(size);
         }
 
         Arc::new(svc)
@@ -307,8 +356,12 @@ pub fn build_test_app_state(
     cp_builder: TestCpBuilder,
     dp_builder: TestDpBuilder,
 ) -> TestAppState {
+    let backend_selector: Arc<dyn EndpointSelector> =
+        Arc::new(crate::infra::proxy::pingora_proxy::PingoraEndpointSelector::new());
     let cp = cp_builder.build_and_register(hub);
-    let dp = dp_builder.build_and_register(hub, cp.clone());
+    let dp = dp_builder
+        .with_backend_selector(backend_selector.clone())
+        .build_and_register(hub, cp.clone());
     let facade: Arc<dyn ServiceGatewayClientV1> =
         Arc::new(ServiceGatewayClientV1Facade::new(cp.clone(), dp.clone()));
     hub.register::<dyn ServiceGatewayClientV1>(facade.clone());
@@ -316,6 +369,7 @@ pub fn build_test_app_state(
         state: crate::module::AppState {
             cp,
             dp,
+            backend_selector,
             config: crate::config::RuntimeConfig {
                 max_body_size_bytes: 100 * 1024 * 1024, // 100 MB default for tests
             },
