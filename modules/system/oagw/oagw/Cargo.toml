@@ -44,7 +44,7 @@ dashmap = { workspace = true }
 thiserror = { workspace = true }
 # DP deps
 form_urlencoded = "1"
-reqwest = { version = "0.13", features = ["stream"] }
+reqwest = { workspace = true }
 futures-util = { workspace = true, features = ["sink"] }
 tokio = { workspace = true, features = ["time"] }
 # test-utils optional deps

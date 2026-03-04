@@ -319,14 +319,22 @@ utoipa = { version = "5.4", features = [
 # HTTP stack dependencies
 hyper = "1.5"
 hyper-util = "0.1"
-hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs"] }
+hyper-rustls = { version = "0.27", default-features = false, features = [
+    "aws-lc-rs",
+    "http1",
+    "http2",
+    "tls12",
+    "native-tokio",
+    "webpki-tokio",
+] }
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-native-certs = "0.8"
 rustls-pki-types = "1"
 http-body-util = "0.1"
 http-body = "1"
 
-# HTTP client helpers
+# HTTP client (default-tls = rustls + aws-lc-rs in 0.13)
+reqwest = { version = "0.13", features = ["stream"] }
 rand = "0.9"
 
 # Synchronous locks for better performance
@@ -340,13 +348,15 @@ sea-orm = { version = "1.1", default-features = false, features = [
     "runtime-tokio-rustls",
     "with-uuid",
     "with-chrono",
+    "with-time",
     "with-rust_decimal",
     "macros",
 ] }
 sea-orm-migration = { version = "1.1", default-features = false, features = [
-    "runtime-tokio",
+    "runtime-tokio-rustls",
 ] }
-# sqlx TLS: use aws-lc-rs provider only (not ring) to avoid crypto provider conflicts
+# sqlx: aws-lc-rs is the intended provider; runtime-tokio-rustls from sea-orm
+# also activates tls-rustls-ring via feature unification (unavoidable, harmless)
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-aws-lc-rs"] }
 
 xxhash-rust = { version = "0.8", features = ["xxh3"] }

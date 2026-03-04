@@ -49,15 +49,9 @@ url = { workspace = true }
 uuid = { workspace = true }
 
 
-# Database - SeaORM
-sea-orm = { workspace = true, features = [
-    "sqlx-sqlite",
-    "runtime-tokio-rustls",
-    "macros",
-    "with-time",
-    "with-uuid",
-] }
-sea-orm-migration = { workspace = true, features = ["sqlx-sqlite"] }
+# Database - SeaORM (driver features come from modkit-db)
+sea-orm = { workspace = true }
+sea-orm-migration = { workspace = true }
 
 # Error handling
 thiserror = { workspace = true }
