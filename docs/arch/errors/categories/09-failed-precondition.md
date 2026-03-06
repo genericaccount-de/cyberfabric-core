@@ -15,6 +15,8 @@ Precondition failure:
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `resource_type` | `String` | GTS type identifier of the associated resource |
+| `resource_name` | `String` | Identifier of the associated resource |
 | `violations` | `Vec<PreconditionViolation>` | List of precondition violations |
 | `extra` | `Option<Object>` | Reserved for derived GTS type extensions (p3+); absent in p1 |
 
@@ -68,6 +70,10 @@ let err = CanonicalError::failed_precondition(
               "type": "string",
               "description": "GTS type identifier of the associated resource (injected when resource_type is set)"
             },
+            "resource_name": {
+              "type": "string",
+              "description": "Identifier of the associated resource (injected when resource_name is set)"
+            },
             "violations": {
               "type": "array",
               "items": { "$ref": "#/$defs/PreconditionViolation" }
@@ -107,6 +113,7 @@ let err = CanonicalError::failed_precondition(
   "detail": "Operation precondition not met",
   "context": {
     "resource_type": "gts.cf.core.tenants.tenant.v1~",
+    "resource_name": "tenant-001",
     "violations": [
       {
         "type": "STATE",

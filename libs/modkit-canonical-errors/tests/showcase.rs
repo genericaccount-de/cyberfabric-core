@@ -151,9 +151,9 @@ fn showcase_out_of_range() {
     #[resource_error("gts.cf.core.users.user.v1~")]
     struct UserResourceError;
 
-    let err = UserResourceError::out_of_range(OutOfRange::constraint(
-        "Page 50 is beyond the last page (12)",
-    ));
+    let err = UserResourceError::out_of_range(OutOfRange::new(vec![
+        FieldViolation::new("page", "Page 50 is beyond the last page (12)", "OUT_OF_RANGE"),
+    ]));
     let problem = Problem::from(err);
     let json = serde_json::to_value(&problem).unwrap();
 
@@ -163,10 +163,16 @@ fn showcase_out_of_range() {
             "type": "gts.cf.core.errors.err.v1~cf.core.err.out_of_range.v1~",
             "title": "Out of Range",
             "status": 400,
-            "detail": "Page 50 is beyond the last page (12)",
+            "detail": "Value out of range",
             "context": {
                 "resource_type": "gts.cf.core.users.user.v1~",
-                "constraint": "Page 50 is beyond the last page (12)"
+                "field_violations": [
+                    {
+                        "field": "page",
+                        "description": "Page 50 is beyond the last page (12)",
+                        "reason": "OUT_OF_RANGE"
+                    }
+                ]
             }
         })
     );
@@ -308,8 +314,7 @@ fn showcase_internal() {
             "detail": "An internal error occurred. Please retry later.",
             "context": {
                 "resource_type": "gts.cf.core.tenants.tenant.v1~",
-                "message": "An internal error occurred. Please retry later.",
-                "stack_entries": []
+                "description": "An internal error occurred. Please retry later."
             }
         })
     );

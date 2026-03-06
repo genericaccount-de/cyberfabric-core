@@ -11,7 +11,7 @@ The canonical error system provides a single, universal error type (`CanonicalEr
 - A GTS compound type identifier for global uniqueness
 - A fixed HTTP status mapping for REST (gRPC/SSE mappings are future work)
 
-The `CanonicalError` enum has one variant per category. Every variant carries four fields: `ctx` (category-specific context type), `message`, `resource_type`, and `debug_info`. Constructing an error is a single expression — e.g., `CanonicalError::not_found(ctx)`. Using the wrong context type for a category is a compile error.
+The `CanonicalError` enum has one variant per category. Every variant carries three fields: `ctx` (category-specific context type), `message`, and `resource_type`. Constructing an error is a single expression — e.g., `CanonicalError::not_found(ctx)`. Using the wrong context type for a category is a compile error.
 
 Canonical errors construction examples:
 
@@ -69,7 +69,7 @@ UserResourceError::permission_denied(error_info) // → CanonicalError::Permissi
 
 Non-resource errors (e.g., `service_unavailable`, `unauthenticated`) use `CanonicalError::` constructors directly.
 
-The `Problem` struct (RFC 9457) is the REST wire format. A single `From<CanonicalError> for Problem` implementation handles all 16 categories. Debug information is isolated: `Problem::from_error()` omits it (production), `Problem::from_error_debug()` includes it (debug mode).
+The `Problem` struct (RFC 9457) is the REST wire format. A single `From<CanonicalError> for Problem` implementation handles all 16 categories.
 
 ### 1.2 Canonical Error Categories
 
@@ -108,7 +108,7 @@ See [§ 4. Category Reference](#4-category-reference) for full definitions inclu
 | `cpt-cf-errors-fr-finite-vocabulary` | 16-variant enum with exhaustive `match` |
 | `cpt-cf-errors-fr-structured-context` | Each variant carries a typed context struct |
 | `cpt-cf-errors-fr-mandatory-trace-id` | `Problem.trace_id` field populated by middleware |
-| `cpt-cf-errors-fr-public-private-isolation` | `debug_info: Option<DebugInfo>` omitted in production via `Problem::from_error()` |
+| `cpt-cf-errors-fr-public-private-isolation` | Internal details never included in production responses; `trace_id` used for correlation |
 | `cpt-cf-errors-fr-compile-time-safety` | Typed enum + `#[resource_error]` macro |
 | `cpt-cf-errors-fr-gts-identification` | `GtsSchema` trait with `SCHEMA_ID` const per context type |
 | `cpt-cf-errors-fr-single-line-construction` | One constructor per category; `CanonicalError::category(ctx)` single expression |
@@ -218,9 +218,7 @@ where `{category}` is the lowercase canonical category name (e.g., `not_found`, 
 
 - [ ] `p1` - **ID**: `cpt-cf-errors-constraint-no-internal-details`
 
-`DebugInfo.stack_entries` is populated only when the application runs in debug mode. In production, `internal` and `unknown` errors return an opaque message with a `trace_id` for correlation. The `detail` field for `internal` errors contains a generic message, never exception text or stack traces.
-
-Enforcement: `Problem::from_error()` (production) always omits the `debug` key. `Problem::from_error_debug()` (debug mode) includes it only if `debug_info` is `Some`.
+In production, `internal` and `unknown` errors return an opaque message with a `trace_id` for correlation. The `detail` field for `internal` errors contains a generic message, never exception text or stack traces. Internal diagnostic information (stack traces, connection strings, file paths) is logged server-side with the `trace_id` for correlation and never included in the response.
 
 #### Error Contract Stability
 
@@ -286,7 +284,7 @@ async fn get_user(Path(id): Path<String>) -> Result<Json<User>, CanonicalError> 
 |--------|-------------|
 | `CanonicalError` | 16-variant enum — the universal error type |
 | `Problem` | RFC 9457 wire format struct for REST responses |
-| Context types | `Validation`, `ResourceInfo`, `ErrorInfo`, `QuotaFailure`, `PreconditionFailure`, `DebugInfo`, `RetryInfo`, `RequestInfo` |
+| Context types | `Validation`, `ResourceInfo`, `ErrorInfo`, `QuotaFailure`, `PreconditionFailure`, `RetryInfo`, `RequestInfo` |
 
 ### 3.2 Component Model
 
@@ -298,8 +296,7 @@ async fn get_user(Path(id): Path<String>) -> Result<Json<User>, CanonicalError> 
 │  │ (16 variants) │──│ Validation, ResourceInfo│ │
 │  └───────┬───────┘  │ ErrorInfo, QuotaFailure │ │
 │          │          │ PreconditionFailure,    │ │
-│          │          │ DebugInfo, RetryInfo,   │ │
-│          │          │ RequestInfo             │ │
+│          │          │ RetryInfo, RequestInfo  │ │
 │          │          └─────────────────────────┘ │
 │          v                                      │
 │  ┌─────────────────┐                            │
@@ -325,11 +322,9 @@ async fn get_user(Path(id): Path<String>) -> Result<Json<User>, CanonicalError> 
 
 **Responsibility scope**:
 
-Owns the 16 canonical error categories. Owns the mapping from category to GTS identifier, HTTP status code, and title. Each variant is a struct with four fields: `ctx` (category-specific context type), `message: String`, `resource_type: Option<String>`, `debug_info: Option<DebugInfo>`.
+Owns the 16 canonical error categories. Owns the mapping from category to GTS identifier, HTTP status code, and title. Each variant is a struct with three fields: `ctx` (category-specific context type), `message: String`, `resource_type: Option<String>`.
 
-Provides ergonomic constructors (one per category), builder methods (`with_message()`, `with_resource_type()`, `with_debug_info()`), and accessors (`message()`, `resource_type()`, `debug_info()`, `gts_type()`, `status_code()`, `title()`).
-
-The `unknown()` constructor takes `impl Into<String>` and wraps it in `DebugInfo` internally.
+Provides ergonomic constructors (one per category), builder methods (`with_message()`, `with_resource_type()`), and accessors (`message()`, `resource_type()`, `gts_type()`, `status_code()`, `title()`).
 
 Provides blanket `From` implementations for common library error types so that `?` propagates library errors into canonical categories without per-call-site mapping.
 
@@ -364,9 +359,7 @@ Context types are pure data. They do not perform validation, logging, or transpo
 
 **Responsibility scope**:
 
-Implements `From<CanonicalError> for Problem` and the two conversion functions:
-- `Problem::from_error(err)` — production mode, omits debug info
-- `Problem::from_error_debug(err)` — debug mode, includes debug info if present
+Implements `From<CanonicalError> for Problem`.
 
 Maps each category to its HTTP status code and serializes the context type into the `context` JSON field. Injects `resource_type` into the context JSON when present.
 
@@ -385,7 +378,7 @@ Only handles REST (HTTP). Does not handle gRPC or SSE. Does not add `trace_id` o
 
 **Responsibility scope**:
 
-Axum middleware that catches any `CanonicalError` returned from handlers, calls `Problem::from_error()` or `Problem::from_error_debug()` based on configuration, sets `trace_id` from the request span, sets `instance` from the request URI, and returns the `application/problem+json` response.
+Axum middleware that catches any `CanonicalError` returned from handlers, calls `Problem::from_error()`, sets `trace_id` from the request span, sets `instance` from the request URI, and returns the `application/problem+json` response.
 
 **Responsibility boundaries**:
 
@@ -448,7 +441,6 @@ Every REST error response follows this structure:
 | `instance` | Request URI path | Variable | URI identifying this specific occurrence |
 | `trace_id` | Request context | Variable | W3C trace ID for correlation |
 | `context` | Serialized context type | Contract schema / Variable values | Category-specific structured details |
-| `debug` | Serialized `DebugInfo` | Variable (debug mode only) | Optional diagnostic info, omitted in production |
 
 **Base Error Schema**
 
@@ -507,27 +499,6 @@ The base error schema defines the common structure for all error categories.
 }
 ```
 
-**Debug mode response example** (includes `debug` key):
-
-```json
-{
-  "type": "gts://gts.cf.core.errors.err.v1~cf.core.err.internal.v1~",
-  "title": "Internal",
-  "status": 500,
-  "detail": "An internal error occurred. Please retry later.",
-  "instance": "/api/v1/users",
-  "trace_id": "4bf92f3577b34da6a3ce929d0e0e4736",
-  "context": {
-    "detail": "An internal error occurred. Please retry later.",
-    "stack_entries": []
-  },
-  "debug": {
-    "detail": "connection refused: postgres://db:5432",
-    "stack_entries": ["at libs/modkit-errors/src/from.rs:42"]
-  }
-}
-```
-
 **Rust definition**:
 
 ```rust
@@ -543,8 +514,6 @@ pub struct Problem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
     pub context: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub debug: Option<serde_json::Value>,
 }
 ```
 
@@ -552,16 +521,12 @@ pub struct Problem {
 
 ```rust
 impl Problem {
-    /// Production mode — debug info always omitted.
     pub fn from_error(err: CanonicalError) -> Self;
-
-    /// Debug mode — includes debug info if present.
-    pub fn from_error_debug(err: CanonicalError) -> Self;
 }
 
 impl From<CanonicalError> for Problem {
     fn from(err: CanonicalError) -> Self {
-        Problem::from_error(err) // production by default
+        Problem::from_error(err)
     }
 }
 ```
@@ -654,11 +619,7 @@ pub fn gts_type(&self) -> &'static str {
 
 ### 3.6 Internal Details Logging
 
-When `debug_info` is attached to a `CanonicalError`:
-- **Production** (`Problem::from_error`): The `debug` key is omitted from the JSON response. The middleware logs the `debug_info` content (detail + stack_entries) at `WARN` or `ERROR` level with the `trace_id` for correlation.
-- **Debug mode** (`Problem::from_error_debug`): The `debug` key is included in the JSON response with the full `DebugInfo` payload.
-
-The decision of which mode to use is made by the error middleware based on application configuration, not by the handler code.
+Internal diagnostic information (stack traces, connection strings, file paths) is never included in the error response. Instead, the middleware logs error details server-side at `WARN` or `ERROR` level with the `trace_id` for correlation. Operators use the `trace_id` from the response to look up the corresponding log entries.
 
 ### 3.7 Interactions & Sequences
 
@@ -687,9 +648,9 @@ Handler                CanonicalError          Problem              Client
 
 1. Handler constructs `CanonicalError` via category constructor or `#[resource_error]` macro
 2. Handler returns `Err(canonical_error)` from the handler function
-3. Error middleware catches the error, calls `Problem::from_error()` (production) or `Problem::from_error_debug()` (debug)
+3. Error middleware catches the error, calls `Problem::from_error()`
 4. Middleware sets `trace_id` from span context, `instance` from request URI
-5. Middleware logs `debug_info` (if present) at WARN/ERROR with `trace_id`
+5. Middleware logs error details server-side at WARN/ERROR with `trace_id` for correlation
 6. Middleware returns `application/problem+json` response to client
 
 #### Trace ID Injection
@@ -699,8 +660,8 @@ The `trace_id` and `instance` fields are **not** set by handler code. They are i
 **How trace_id is injected**:
 
 1. **Tracing span extraction**: The middleware extracts the trace ID from incoming request headers (`x-trace-id`, `x-request-id`, `traceparent`). If no W3C trace ID is available, the current span ID may be used as a temporary fallback until the W3C extraction workstream is completed.
-2. **Problem enrichment**: After calling `Problem::from_error()` or `Problem::from_error_debug()`, the middleware sets `trace_id` and `instance` before serializing the response
-3. **Logging correlation**: The same `trace_id` is used when logging `debug_info` (if present) at WARN/ERROR level
+2. **Problem enrichment**: After calling `Problem::from_error()`, the middleware sets `trace_id` and `instance` before serializing the response
+3. **Logging correlation**: The same `trace_id` is used when logging error details at WARN/ERROR level
 
 **Middleware implementation example**:
 
@@ -710,10 +671,7 @@ use axum::http::Uri;
 
 // In error middleware layer:
 async fn handle_error(err: CanonicalError, uri: &Uri, trace_id: Option<String>) -> Problem {
-    // Extract debug_info before moving err into Problem::from_error()
-    let debug_info = err.debug_info().cloned();
-
-    let mut problem = Problem::from_error(err);  // or from_error_debug() in debug mode
+    let mut problem = Problem::from_error(err);
 
     // Inject trace_id from span or request headers
     problem.trace_id = trace_id.or_else(|| {
@@ -725,15 +683,6 @@ async fn handle_error(err: CanonicalError, uri: &Uri, trace_id: Option<String>) 
 
     // Inject instance from request URI
     problem.instance = Some(uri.path().to_string());
-
-    // Log debug_info if present (production mode omits it from response)
-    if let Some(debug) = debug_info {
-        tracing::error!(
-            trace_id = ?problem.trace_id,
-            detail = %debug.detail,
-            "Internal error occurred"
-        );
-    }
 
     problem
 }
@@ -790,7 +739,7 @@ Not applicable. Errors are transient in-memory values. No persistent storage.
 
 Each section below defines one canonical error category: GTS ID, HTTP mapping, context type, constructor, JSON wire example, and similar categories.
 
-All variants share the same structure: `{ ctx: ContextType, message: String, resource_type: Option<String>, debug_info: Option<DebugInfo> }`. Context schemas are documented where first introduced; subsequent categories using the same context type reference back.
+All variants share the same structure: `{ ctx: ContextType, message: String, resource_type: Option<String> }`. Context schemas are documented where first introduced; subsequent categories using the same context type reference back.
 
 
 ### 4.1 `cancelled`
@@ -800,6 +749,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.cancelled.v1~`
 **HTTP Status**: 499
 **Title**: "Cancelled"
+**Context Type**: `Cancelled`
 **Use When**: The client cancelled the request before the server finished processing.
 
 → [Full reference](./categories/01-cancelled.md)
@@ -811,6 +761,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.unknown.v1~`
 **HTTP Status**: 500
 **Title**: "Unknown"
+**Context Type**: `Unknown`
 **Use When**: An error occurred that does not match any other canonical category.
 
 → [Full reference](./categories/02-unknown.md)
@@ -822,6 +773,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.invalid_argument.v1~`
 **HTTP Status**: 400
 **Title**: "Invalid Argument"
+**Context Type**: `InvalidArgument`
 **Use When**: The client sent an invalid request — malformed fields, bad format, or constraint violations.
 
 → [Full reference](./categories/03-invalid-argument.md)
@@ -833,6 +785,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.deadline_exceeded.v1~`
 **HTTP Status**: 504
 **Title**: "Deadline Exceeded"
+**Context Type**: `DeadlineExceeded`
 **Use When**: The server did not complete the operation within the allowed time.
 
 → [Full reference](./categories/04-deadline-exceeded.md)
@@ -844,6 +797,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.not_found.v1~`
 **HTTP Status**: 404
 **Title**: "Not Found"
+**Context Type**: `NotFound`
 **Use When**: The requested resource does not exist or was filtered out by access controls.
 
 → [Full reference](./categories/05-not-found.md)
@@ -855,6 +809,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.already_exists.v1~`
 **HTTP Status**: 409
 **Title**: "Already Exists"
+**Context Type**: `AlreadyExists`
 **Use When**: The resource the client tried to create already exists.
 
 → [Full reference](./categories/06-already-exists.md)
@@ -866,6 +821,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.permission_denied.v1~`
 **HTTP Status**: 403
 **Title**: "Permission Denied"
+**Context Type**: `PermissionDenied`
 **Use When**: The caller is authenticated but does not have permission for the requested operation.
 
 → [Full reference](./categories/07-permission-denied.md)
@@ -877,6 +833,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.resource_exhausted.v1~`
 **HTTP Status**: 429
 **Title**: "Resource Exhausted"
+**Context Type**: `ResourceExhausted`
 **Use When**: A quota or rate limit was exceeded.
 
 → [Full reference](./categories/08-resource-exhausted.md)
@@ -888,6 +845,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.failed_precondition.v1~`
 **HTTP Status**: 400
 **Title**: "Failed Precondition"
+**Context Type**: `FailedPrecondition`
 **Use When**: The request is valid but the system is not in the required state to perform it.
 
 → [Full reference](./categories/09-failed-precondition.md)
@@ -899,6 +857,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.aborted.v1~`
 **HTTP Status**: 409
 **Title**: "Aborted"
+**Context Type**: `Aborted`
 **Use When**: The operation was aborted due to a concurrency conflict. The client can retry.
 
 → [Full reference](./categories/10-aborted.md)
@@ -910,6 +869,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.out_of_range.v1~`
 **HTTP Status**: 400
 **Title**: "Out of Range"
+**Context Type**: `OutOfRange`
 **Use When**: A value is syntactically valid but outside the acceptable range.
 
 → [Full reference](./categories/11-out-of-range.md)
@@ -921,6 +881,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.unimplemented.v1~`
 **HTTP Status**: 501
 **Title**: "Unimplemented"
+**Context Type**: `Unimplemented`
 **Use When**: The requested operation is recognized but not implemented.
 
 → [Full reference](./categories/12-unimplemented.md)
@@ -932,6 +893,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.internal.v1~`
 **HTTP Status**: 500
 **Title**: "Internal"
+**Context Type**: `Internal`
 **Use When**: A known infrastructure failure occurred (database error, serialization bug, etc.).
 
 → [Full reference](./categories/13-internal.md)
@@ -942,7 +904,8 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.service_unavailable.v1~`
 **HTTP Status**: 503
-**Title**: "Unavailable"
+**Title**: "Service Unavailable"
+**Context Type**: `ServiceUnavailable`
 **Use When**: The service is temporarily unavailable.
 
 → [Full reference](./categories/14-service-unavailable.md)
@@ -954,6 +917,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.data_loss.v1~`
 **HTTP Status**: 500
 **Title**: "Data Loss"
+**Context Type**: `DataLoss`
 **Use When**: Unrecoverable data loss or corruption detected.
 
 → [Full reference](./categories/15-data-loss.md)
@@ -965,6 +929,7 @@ All variants share the same structure: `{ ctx: ContextType, message: String, res
 **GTS ID**: `gts.cf.core.errors.err.v1~cf.core.err.unauthenticated.v1~`
 **HTTP Status**: 401
 **Title**: "Unauthenticated"
+**Context Type**: `Unauthenticated`
 **Use When**: The request does not have valid authentication credentials.
 
 → [Full reference](./categories/16-unauthenticated.md)

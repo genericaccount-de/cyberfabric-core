@@ -17,6 +17,8 @@ InvalidArgument:
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `resource_type` | `String` | GTS type identifier of the associated resource |
+| `resource_name` | `String` | Identifier of the associated resource |
 | `field_violations` | `Vec<FieldViolation>` | List of per-field validation errors |
 | `extra` | `Option<Object>` | Reserved for derived GTS type extensions (p3+); absent in p1 |
 
@@ -32,6 +34,8 @@ Field violation:
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `resource_type` | `String` | GTS type identifier of the associated resource |
+| `resource_name` | `String` | Identifier of the associated resource |
 | `format` | `String` | Human-readable format error message |
 | `extra` | `Option<Object>` | Reserved for derived GTS type extensions (p3+); absent in p1 |
 
@@ -39,6 +43,8 @@ Field violation:
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `resource_type` | `String` | GTS type identifier of the associated resource |
+| `resource_name` | `String` | Identifier of the associated resource |
 | `constraint` | `String` | Human-readable constraint violation message |
 | `extra` | `Option<Object>` | Reserved for derived GTS type extensions (p3+); absent in p1 |
 
@@ -84,6 +90,7 @@ let err = CanonicalError::invalid_argument(
               "required": ["field_violations"],
               "properties": {
                 "resource_type": { "type": "string" },
+                "resource_name": { "type": "string" },
                 "field_violations": {
                   "type": "array",
                   "items": { "$ref": "#/$defs/FieldViolation" }
@@ -97,6 +104,7 @@ let err = CanonicalError::invalid_argument(
               "required": ["format"],
               "properties": {
                 "resource_type": { "type": "string" },
+                "resource_name": { "type": "string" },
                 "format": { "type": "string" },
                 "extra": { "type": ["object", "null"] }
               },
@@ -107,6 +115,7 @@ let err = CanonicalError::invalid_argument(
               "required": ["constraint"],
               "properties": {
                 "resource_type": { "type": "string" },
+                "resource_name": { "type": "string" },
                 "constraint": { "type": "string" },
                 "extra": { "type": ["object", "null"] }
               },
@@ -142,6 +151,7 @@ let err = CanonicalError::invalid_argument(
   "detail": "Request validation failed",
   "context": {
     "resource_type": "gts.cf.core.users.user.v1~",
+    "resource_name": "user-123",
     "field_violations": [
       {
         "field": "email",

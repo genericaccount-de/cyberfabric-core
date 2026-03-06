@@ -76,7 +76,7 @@ No module-specific environment constraints. The canonical error system runs with
 - Contract enforcement via compile-time checks, snapshot tests, and CI gates
 - Automatic propagation of common library errors into canonical categories
 - Round-trip serialization/deserialization (server → wire → SDK)
-- Public vs private detail isolation (client-facing context vs internal debug info)
+- Public vs private detail isolation (client-facing context vs server-side logging with trace_id)
 - Migration of all existing modules to the new error system
 - Dylint-level rules enforcement
 
@@ -132,7 +132,7 @@ Every error response MUST include a trace ID for request correlation.
 
 - [ ] `p1` - **ID**: `cpt-cf-errors-fr-public-private-isolation`
 
-The system MUST separate client-facing error details (context, message) from internal diagnostic information (stack traces, query text). Internal details MUST NOT appear in production error responses. Internal details MUST be available in debug mode and MUST be logged for diagnostics.
+The system MUST separate client-facing error details (context, message) from internal diagnostic information (stack traces, query text). Internal details MUST NOT appear in error responses. Internal details MUST be logged server-side with the `trace_id` for correlation.
 
 - **Rationale**: Prevents information leakage in production while preserving debuggability.
 - **Actors**: `cpt-cf-errors-actor-module-developer`

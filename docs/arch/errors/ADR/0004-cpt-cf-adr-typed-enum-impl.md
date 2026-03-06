@@ -48,7 +48,7 @@ The PoC implementation (`canonical-errors/src/lib.rs`) demonstrates all 16 varia
 
 ### Option A: Typed Enum
 
-A single `enum CanonicalError` with 16 variants. Each variant carries `ctx: ContextType`, `message: String`, `resource_type: Option<String>`, `debug_info: Option<DebugInfo>`.
+A single `enum CanonicalError` with 16 variants. Each variant carries `ctx: ContextType`, `message: String`, `resource_type: Option<String>`.
 
 * Good, because exhaustive `match` — compiler enforces all categories are handled
 * Good, because each variant has a specific context type — wrong context is a compile error

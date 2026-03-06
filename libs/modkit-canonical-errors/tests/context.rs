@@ -1,7 +1,7 @@
 extern crate cf_modkit_errors;
 
 use cf_modkit_errors::{
-    Aborted, AlreadyExists, Cancelled, DataLoss, DeadlineExceeded, DebugInfo, FailedPrecondition,
+    Aborted, AlreadyExists, Cancelled, DataLoss, DeadlineExceeded, FailedPrecondition,
     FieldViolation, Internal, InvalidArgument, NotFound, OutOfRange, PermissionDenied,
     PreconditionViolation, QuotaViolation, ResourceExhausted, ServiceUnavailable, Unauthenticated,
     Unimplemented, Unknown,
@@ -139,7 +139,7 @@ fn aborted_serialization() {
 
 #[test]
 fn out_of_range_field_violations_serialization() {
-    let ctx = OutOfRange::fields(vec![FieldViolation::new(
+    let ctx = OutOfRange::new(vec![FieldViolation::new(
         "page",
         "must be between 1 and 12",
         "OUT_OF_RANGE",
@@ -149,19 +149,6 @@ fn out_of_range_field_violations_serialization() {
     assert_eq!(json["field_violations"][0]["field"], "page");
 }
 
-#[test]
-fn out_of_range_format_serialization() {
-    let ctx = OutOfRange::format("page number must be an integer");
-    let json = serde_json::to_value(&ctx).unwrap();
-    assert_eq!(json["format"], "page number must be an integer");
-}
-
-#[test]
-fn out_of_range_constraint_serialization() {
-    let ctx = OutOfRange::constraint("page out of range");
-    let json = serde_json::to_value(&ctx).unwrap();
-    assert_eq!(json["constraint"], "page out of range");
-}
 
 #[test]
 fn unimplemented_serialization() {
@@ -175,8 +162,7 @@ fn unimplemented_serialization() {
 fn internal_serialization() {
     let ctx = Internal::new("db pool exhausted");
     let json = serde_json::to_value(&ctx).unwrap();
-    assert_eq!(json["message"], "db pool exhausted");
-    assert_eq!(json["stack_entries"], serde_json::json!([]));
+    assert_eq!(json["description"], "db pool exhausted");
 }
 
 #[test]
@@ -203,10 +189,3 @@ fn unauthenticated_serialization() {
     assert_eq!(json["domain"], "auth.cyberfabric.io");
 }
 
-#[test]
-fn debug_info_serialization() {
-    let ctx = DebugInfo::new("something broke").with_stack(vec!["frame1".to_string()]);
-    let json = serde_json::to_value(&ctx).unwrap();
-    assert_eq!(json["detail"], "something broke");
-    assert_eq!(json["stack_entries"][0], "frame1");
-}

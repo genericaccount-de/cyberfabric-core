@@ -33,7 +33,7 @@ let err = CanonicalError::not_found(
 struct UserResourceError;
 
 let err = UserResourceError::not_found("user-123");
-// Auto-creates ResourceInfo and sets resource_type
+// Auto-creates NotFound context and sets resource_type
 ```
 
 ## JSON Wire — JSON Schema

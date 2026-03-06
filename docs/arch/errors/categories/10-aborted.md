@@ -13,6 +13,8 @@
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `resource_type` | `String` | GTS type identifier of the associated resource |
+| `resource_name` | `String` | Identifier of the associated resource |
 | `reason` | `String` | Machine-readable reason code (e.g., `OPTIMISTIC_LOCK_FAILURE`) |
 | `domain` | `String` | Logical grouping (e.g., `"cf.oagw"`) |
 | `extra` | `Option<Object>` | Reserved for derived GTS type extensions (p3+); absent in p1 |
@@ -48,6 +50,14 @@ let err = CanonicalError::aborted(
           "type": "object",
           "required": ["reason", "domain"],
           "properties": {
+            "resource_type": {
+              "type": "string",
+              "description": "GTS type identifier of the associated resource (injected when resource_type is set)"
+            },
+            "resource_name": {
+              "type": "string",
+              "description": "Identifier of the associated resource (injected when resource_name is set)"
+            },
             "reason": {
               "type": "string",
               "description": "Machine-readable reason code (e.g., OPTIMISTIC_LOCK_FAILURE)"
@@ -79,6 +89,7 @@ let err = CanonicalError::aborted(
   "detail": "Operation aborted due to concurrency conflict",
   "context": {
     "resource_type": "gts.cf.oagw.upstreams.upstream.v1~",
+    "resource_name": "upstream-123",
     "reason": "OPTIMISTIC_LOCK_FAILURE",
     "domain": "cf.oagw"
   }

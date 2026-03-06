@@ -15,6 +15,8 @@ Quota failure:
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `resource_type` | `String` | GTS type identifier of the associated resource |
+| `resource_name` | `String` | Identifier of the associated resource |
 | `violations` | `Vec<QuotaViolation>` | List of quota violations |
 | `extra` | `Option<Object>` | Reserved for derived GTS type extensions (p3+); absent in p1 |
 
@@ -60,6 +62,14 @@ let err = CanonicalError::resource_exhausted(
           "type": "object",
           "required": ["violations"],
           "properties": {
+            "resource_type": {
+              "type": "string",
+              "description": "GTS type identifier of the associated resource (injected when resource_type is set)"
+            },
+            "resource_name": {
+              "type": "string",
+              "description": "Identifier of the associated resource (injected when resource_name is set)"
+            },
             "violations": {
               "type": "array",
               "items": { "$ref": "#/$defs/QuotaViolation" }
@@ -97,6 +107,8 @@ let err = CanonicalError::resource_exhausted(
   "status": 429,
   "detail": "Quota exceeded",
   "context": {
+    "resource_type": "gts.cf.core.users.user.v1~",
+    "resource_name": "user-123",
     "violations": [
       {
         "subject": "requests_per_minute",

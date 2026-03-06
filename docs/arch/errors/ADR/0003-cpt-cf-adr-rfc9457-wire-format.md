@@ -30,12 +30,12 @@ Chosen option: **Option A — RFC 9457 Problem Details**, because it is an IETF 
 
 ### Consequences
 
-* The error library must define a `Problem` struct with the five standard RFC 9457 members (`type`, `title`, `status`, `detail`, `instance`) plus CyberFabric extension members (`trace_id`, `context`, `debug`)
+* The error library must define a `Problem` struct with the five standard RFC 9457 members (`type`, `title`, `status`, `detail`, `instance`) plus CyberFabric extension members (`trace_id`, `context`)
 * All REST error responses must use `Content-Type: application/problem+json` — middleware must set this header
 * The `type` field carries a GTS URI (not a dereferenceable URL), which deviates from RFC 9457's intent but is valid per spec — this must be documented as a known deviation
 * gRPC and SSE transports will need their own wire format mappings in the future — RFC 9457 only covers REST
 * Round-trip deserialization (SDK side) must parse the `Problem` JSON and reconstruct `CanonicalError` from the `type` field — the `TryFrom<Problem>` implementation is required
-* Extension members (`context`, `debug`, `trace_id`) must be defined and versioned alongside the core Problem structure
+* Extension members (`context`, `trace_id`) must be defined and versioned alongside the core Problem structure
 
 ### Confirmation
 
@@ -85,7 +85,6 @@ RFC 9457 wire format with CyberFabric extensions:
 | `instance` | Standard (§3.1.5) | Request URI path |
 | `trace_id` | Extension (§3.2) | W3C trace ID for correlation |
 | `context` | Extension (§3.2) | Category-specific structured details |
-| `debug` | Extension (§3.2) | Optional diagnostic info (debug mode only) |
 
 See [DESIGN.md](../DESIGN.md) § RFC 9457 Problem Wire Format.
 

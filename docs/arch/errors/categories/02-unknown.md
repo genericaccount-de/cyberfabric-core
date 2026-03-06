@@ -13,6 +13,8 @@
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `resource_type` | `String` | GTS type identifier of the associated resource |
+| `resource_name` | `String` | Identifier of the associated resource |
 | `description` | `String` | Human-readable debug message (generic in production) |
 | `extra` | `Option<Object>` | Reserved for derived GTS type extensions (p3+); absent in p1 |
 
@@ -50,6 +52,10 @@ let err = CanonicalError::unknown(
               "type": "string",
               "description": "GTS type identifier of the associated resource (injected when resource_type is set)"
             },
+            "resource_name": {
+              "type": "string",
+              "description": "Identifier of the associated resource (injected when resource_name is set)"
+            },
             "description": {
               "type": "string",
               "description": "Human-readable debug message (generic in production)"
@@ -72,6 +78,8 @@ let err = CanonicalError::unknown(
   "status": 500,
   "detail": "Unexpected response from payment provider",
   "context": {
+    "resource_type": "gts.cf.core.payments.payment.v1~",
+    "resource_name": "pay-456",
     "description": "Unexpected response from payment provider"
   }
 }

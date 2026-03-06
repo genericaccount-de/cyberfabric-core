@@ -13,6 +13,8 @@
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `resource_type` | `String` | GTS type identifier of the associated resource |
+| `resource_name` | `String` | Identifier of the associated resource |
 | `extra` | `Option<Object>` | Reserved for derived GTS type extensions (p3+); absent in p1 |
 
 ## Constructor Example
@@ -46,6 +48,10 @@ let err = CanonicalError::deadline_exceeded(DeadlineExceeded::new());
               "type": "string",
               "description": "GTS type identifier of the associated resource (injected when resource_type is set)"
             },
+            "resource_name": {
+              "type": "string",
+              "description": "Identifier of the associated resource (injected when resource_name is set)"
+            },
             "extra": {
               "type": ["object", "null"],
               "description": "Reserved for derived GTS type extensions (p3+); absent in p1"
@@ -68,7 +74,8 @@ let err = CanonicalError::deadline_exceeded(DeadlineExceeded::new());
   "status": 504,
   "detail": "Operation did not complete within the allowed time",
   "context": {
-    "resource_type": "gts.cf.core.users.user.v1~"
+    "resource_type": "gts.cf.core.users.user.v1~",
+    "resource_name": "user-123"
   }
 }
 ```

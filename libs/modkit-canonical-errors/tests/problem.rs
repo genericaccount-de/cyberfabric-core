@@ -1,6 +1,6 @@
 extern crate cf_modkit_errors;
 
-use cf_modkit_errors::{CanonicalError, DebugInfo, NotFound, Problem, ServiceUnavailable, Unknown};
+use cf_modkit_errors::{CanonicalError, NotFound, Problem, ServiceUnavailable, Unknown};
 
 #[test]
 fn problem_from_not_found_has_correct_fields() {
@@ -26,7 +26,6 @@ fn problem_json_excludes_none_fields() {
     let problem = Problem::from(err);
     let json = serde_json::to_value(&problem).unwrap();
     assert!(json.get("trace_id").is_none());
-    assert!(json.get("debug").is_none());
 }
 
 #[test]
@@ -44,26 +43,3 @@ fn problem_json_excludes_resource_type_when_none() {
     assert!(json["context"].get("resource_type").is_none());
 }
 
-#[test]
-fn from_error_omits_debug_info() {
-    let err = CanonicalError::not_found(NotFound::new("t", "n"))
-        .with_debug_info(DebugInfo::new("secret trace"));
-    let problem = Problem::from_error(&err);
-    assert!(problem.debug.is_none());
-}
-
-#[test]
-fn from_error_debug_includes_debug_info() {
-    let err = CanonicalError::not_found(NotFound::new("t", "n"))
-        .with_debug_info(DebugInfo::new("secret trace"));
-    let problem = Problem::from_error_debug(&err);
-    let debug = problem.debug.unwrap();
-    assert_eq!(debug["detail"], "secret trace");
-}
-
-#[test]
-fn from_error_debug_without_debug_info_has_none() {
-    let err = CanonicalError::not_found(NotFound::new("t", "n"));
-    let problem = Problem::from_error_debug(&err);
-    assert!(problem.debug.is_none());
-}

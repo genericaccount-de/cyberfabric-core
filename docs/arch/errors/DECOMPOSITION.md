@@ -21,29 +21,28 @@ Build the `CanonicalError` enum, context types, `Problem` mapping, and `#[resour
 #### 1.1 Core types
 
 - [ ] 1.1.1 Define `CanonicalError` enum with 16 variants in `libs/modkit-errors/src/canonical.rs`
-- [ ] 1.1.2 Define context types: `Validation`, `ResourceInfo`, `ErrorInfo`, `QuotaFailure`, `PreconditionFailure`, `DebugInfo`, `RetryInfo`, `RequestInfo` in `libs/modkit-errors/src/context.rs`
-- [ ] 1.1.3 Implement `GtsSchema` for each context type via `#[struct_to_gts_schema]` macro
+- [ ] 1.1.2 Define 16 per-category context types in `libs/modkit-errors/src/`: `Cancelled`, `Unknown`, `InvalidArgument`, `DeadlineExceeded`, `NotFound`, `AlreadyExists`, `PermissionDenied`, `ResourceExhausted`, `FailedPrecondition`, `Aborted`, `OutOfRange`, `Unimplemented`, `Internal`, `ServiceUnavailable`, `DataLoss`, `Unauthenticated`; plus sub-types `FieldViolation`, `QuotaViolation`, `PreconditionViolation`. Use versioned naming (`XxxV1`) with unversioned type aliases (e.g., `pub type NotFound = NotFoundV1;`). Each type carries an internal `gts_type: GtsSchemaId` field (skipped during serialization) and a reserved `extra: Option<serde_json::Value>` field (always absent in p1, see DESIGN §3.8)
+- [ ] 1.1.3 Implement `GtsSchema` for each of the 16 per-category context types and 3 sub-types via `#[struct_to_gts_schema]` macro
 - [ ] 1.1.4 Implement `GtsSchema` for `CanonicalError` (oneOf schema with all 16 variants)
-- [ ] 1.1.5 Implement ergonomic constructors (one per category) and builder methods (`with_message`, `with_resource_type`, `with_debug_info`)
-- [ ] 1.1.6 Implement accessors: `message()`, `resource_type()`, `debug_info()`, `gts_type()`, `status_code()`, `title()`
+- [ ] 1.1.5 Implement ergonomic constructors (one per category: `CanonicalError::category(ctx)`) and builder methods (`with_message()`, `with_resource_type()`)
+- [ ] 1.1.6 Implement accessors: `message()`, `resource_type()`, `gts_type()`, `status_code()`, `title()`
 - [ ] 1.1.7 Implement `Display` and `std::error::Error` for `CanonicalError`
 
 #### 1.2 REST mapping
 
 > Traces to: `cpt-cf-errors-interface-problem-wire-format`, `cpt-cf-errors-constraint-rfc9457`
 
-- [ ] 1.2.1 Define `Problem` struct with RFC 9457 fields + `trace_id`, `context`, `debug` extensions
-- [ ] 1.2.2 Implement `Problem::from_error()` (production — omits debug)
-- [ ] 1.2.3 Implement `Problem::from_error_debug()` (debug — includes debug if present)
-- [ ] 1.2.4 Implement `From<CanonicalError> for Problem` delegating to `from_error()`
-- [ ] 1.2.5 Implement `TryFrom<Problem> for CanonicalError` for SDK round-trip
+- [ ] 1.2.1 Define `Problem` struct with RFC 9457 fields + `trace_id`, `context` extensions
+- [ ] 1.2.2 Implement `Problem::from_error()`
+- [ ] 1.2.3 Implement `From<CanonicalError> for Problem` delegating to `from_error()`
+- [ ] 1.2.5 (`p2`) Implement `TryFrom<Problem> for CanonicalError` for SDK round-trip — match GTS type URI against 16 known identifiers to dispatch to correct variant (traces to `cpt-cf-errors-interface-problem-roundtrip`)
 
 #### 1.3 Resource error macro
 
 > Traces to: `cpt-cf-errors-component-resource-error-macro`, `cpt-cf-errors-constraint-macro-gts-construction`
 
 - [ ] 1.3.1 Implement `#[resource_error("gts.cf.core.users.user.v1~")]` proc macro in `libs/modkit-errors-macro/`
-- [ ] 1.3.2 Generate 15 associated functions per annotated struct (all categories except `service_unavailable`)
+- [ ] 1.3.2 Generate 15 associated functions per annotated struct (all categories except `service_unavailable`). For `not_found`, `already_exists`, and `data_loss`: take a single `impl Into<String>` (resource name) and construct the context type internally; other categories take the category-specific context type
 - [ ] 1.3.3 Validate GTS identifier at compile time — must be a valid GTS type ID registered in the Types Registry and must end with `~`
 
 #### 1.4 Blanket `From` implementations
@@ -58,11 +57,11 @@ Build the `CanonicalError` enum, context types, `Problem` mapping, and `#[resour
 
 #### 1.5 Dylint enforcement rules
 
-> Traces to: PRD § 12 Risks — "LLM agents bypass compile checks"
+> Traces to: `cpt-cf-errors-component-dylint-rules`, PRD § 12 Risks — "LLM agents bypass compile checks"
 
-- [ ] 1.5.1 Implement a dylint rule — reject any `Problem::new()`, `Problem { ... }` struct literals, or direct `IntoResponse` impls that bypass `CanonicalError`
-- [ ] 1.5.2 Implement a dylint rule — reject module-specific error enums in handler return types (only `Result<T, CanonicalError>` allowed)
-- [ ] 1.5.3 Implement a dylint rule — warn when constructing `ResourceInfo` manually in modules that have declared a `#[resource_error]` type for that GTS identifier
+- [ ] 1.5.1 Implement a dylint rule — **No direct `Problem` construction**: reject `Problem { ... }` struct literals and direct `IntoResponse` impls that bypass `CanonicalError`; all `Problem` instances must originate from `CanonicalError` via the `From` impl
+- [ ] 1.5.2 Implement a dylint rule — **No legacy error patterns**: reject usage of `Problem::new()`, `ErrDef`, `declare_errors!`, or `ErrorCode`
+- [ ] 1.5.3 Implement a dylint rule — **No raw status-code error responses**: handlers must return `Result<T, CanonicalError>`, not ad-hoc HTTP error responses or module-specific error enums
 - [ ] 1.5.4 Add dylint CI gate to run on all module code
 
 #### 1.6 Contract enforcement (Tier 2)
@@ -78,16 +77,15 @@ Build the `CanonicalError` enum, context types, `Problem` mapping, and `#[resour
 
 ### Phase 2 — Error Middleware
 
-- [ ] `p1` - **ID**: `cpt-cf-errors-feature-error-middleware`
+- [ ] `p2` - **ID**: `cpt-cf-errors-feature-error-middleware`
 
 > Traces to: `cpt-cf-errors-component-error-middleware`, `cpt-cf-errors-fr-mandatory-trace-id`
 
 - [ ] 2.1 Implement Axum error middleware that catches `CanonicalError` from handlers
 - [ ] 2.2 Set `trace_id` from the current tracing span context or request headers (`x-trace-id`, `x-request-id`, `traceparent`)
 - [ ] 2.3 Set `instance` from the request URI path
-- [ ] 2.4 Select `from_error()` vs `from_error_debug()` based on application configuration
-- [ ] 2.5 Catch panics and unhandled errors, wrap as `CanonicalError::internal(...)`
-- [ ] 2.6 Log `debug_info` at WARN/ERROR with `trace_id` for correlation
+- [ ] 2.4 Catch panics and unhandled errors, wrap as `CanonicalError::internal(...)` (catch-all behavior is out of scope for p1; deferred per PRD §4.2 and DESIGN §3.2 Error Middleware)
+- [ ] 2.5 Log error details server-side at WARN/ERROR with `trace_id` for correlation
 
 ---
 
@@ -146,7 +144,7 @@ All modules are now on `CanonicalError`. Remove legacy infrastructure and finali
 
 - [ ] 4.2.1 Remove `ErrDef` struct from `libs/modkit-errors/src/catalog.rs`
 - [ ] 4.2.2 Remove `declare_errors!` macro from `libs/modkit-errors-macro/`
-- [ ] 4.2.3 Remove `ValidationViolation` struct (replaced by `FieldViolation` in `Validation` context)
+- [ ] 4.2.3 Remove `ValidationViolation` struct (replaced by `FieldViolation` in `InvalidArgument` and `OutOfRange` context types)
 - [ ] 4.2.4 Remove `ValidationError` and `ValidationErrorResponse` structs
 - [ ] 4.2.5 Remove convenience constructors from `libs/modkit/src/api/problem.rs` (`bad_request`, `not_found`, `conflict`, `internal_error`)
 - [ ] 4.2.6 Remove all `gts/errors.json` files from modules and examples
@@ -186,7 +184,7 @@ Update all documentation to reflect the canonical error architecture. Can run in
 - [ ] 6.1.3 Update `docs/modkit_unified_system/03_clienthub_and_plugins.md` — update error handling in SDK error boundaries
 - [ ] 6.1.4 Update `docs/modkit_unified_system/04_rest_operation_builder.md` — update error registration examples
 - [ ] 6.1.5 Update `docs/modkit_unified_system/06_authn_authz_secure_orm.md` — update error handling for auth flows
-- [ ] 6.1.6 Update `docs/modkit_unified_system/07_odata_pagination_select_filter.md` — update OData validation to use `CanonicalError::invalid_argument` with `Validation` context
+- [ ] 6.1.6 Update `docs/modkit_unified_system/07_odata_pagination_select_filter.md` — update OData validation to use `CanonicalError::invalid_argument` with `InvalidArgument` context
 - [ ] 6.1.7 Update `docs/modkit_unified_system/10_checklists_and_templates.md` — update error handling checklist and templates
 
 #### 6.2 Architecture-level docs

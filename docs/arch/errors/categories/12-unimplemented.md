@@ -13,6 +13,8 @@
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `resource_type` | `String` | GTS type identifier of the associated resource |
+| `resource_name` | `String` | Identifier of the associated resource |
 | `reason` | `String` | Machine-readable reason code (e.g., `GRPC_ROUTING`) |
 | `domain` | `String` | Logical grouping (e.g., `"cf.oagw"`) |
 | `extra` | `Option<Object>` | Reserved for derived GTS type extensions (p3+); absent in p1 |
@@ -51,6 +53,10 @@ let err = CanonicalError::unimplemented(
               "type": "string",
               "description": "GTS type identifier of the associated resource (injected when resource_type is set)"
             },
+            "resource_name": {
+              "type": "string",
+              "description": "Identifier of the associated resource (injected when resource_name is set)"
+            },
             "reason": {
               "type": "string",
               "description": "Machine-readable reason code (e.g., GRPC_ROUTING)"
@@ -82,6 +88,7 @@ let err = CanonicalError::unimplemented(
   "detail": "This operation is not implemented",
   "context": {
     "resource_type": "gts.cf.oagw.upstreams.upstream.v1~",
+    "resource_name": "upstream-123",
     "reason": "GRPC_ROUTING",
     "domain": "cf.oagw"
   }

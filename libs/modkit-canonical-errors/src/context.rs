@@ -256,38 +256,17 @@ impl Aborted {
     }
 }
 
-// 11 OutOfRange — context: OutOfRange (same variant structure as InvalidArgument)
+// 11 OutOfRange — context: OutOfRange
 #[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
-pub enum OutOfRange {
-    FieldViolations {
-        field_violations: Vec<FieldViolation>,
-    },
-    Format {
-        format: String,
-    },
-    Constraint {
-        constraint: String,
-    },
+pub struct OutOfRange {
+    pub field_violations: Vec<FieldViolation>,
 }
 
 impl OutOfRange {
     #[must_use]
-    pub fn fields(violations: impl Into<Vec<FieldViolation>>) -> Self {
-        Self::FieldViolations {
+    pub fn new(violations: impl Into<Vec<FieldViolation>>) -> Self {
+        Self {
             field_violations: violations.into(),
-        }
-    }
-
-    #[must_use]
-    pub fn format(msg: impl Into<String>) -> Self {
-        Self::Format { format: msg.into() }
-    }
-
-    #[must_use]
-    pub fn constraint(msg: impl Into<String>) -> Self {
-        Self::Constraint {
-            constraint: msg.into(),
         }
     }
 }
@@ -312,23 +291,15 @@ impl Unimplemented {
 // 13 Internal — context: Internal
 #[derive(Debug, Clone, Serialize)]
 pub struct Internal {
-    pub message: String,
-    pub stack_entries: Vec<String>,
+    pub description: String,
 }
 
 impl Internal {
     #[must_use]
-    pub fn new(message: impl Into<String>) -> Self {
+    pub fn new(description: impl Into<String>) -> Self {
         Self {
-            message: message.into(),
-            stack_entries: Vec::new(),
+            description: description.into(),
         }
-    }
-
-    #[must_use]
-    pub fn with_stack(mut self, entries: impl Into<Vec<String>>) -> Self {
-        self.stack_entries = entries.into();
-        self
     }
 }
 
@@ -389,28 +360,3 @@ impl Unauthenticated {
     }
 }
 
-// ---------------------------------------------------------------------------
-// DebugInfo — attached to CanonicalError as an optional envelope field
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, Serialize)]
-pub struct DebugInfo {
-    pub detail: String,
-    pub stack_entries: Vec<String>,
-}
-
-impl DebugInfo {
-    #[must_use]
-    pub fn new(detail: impl Into<String>) -> Self {
-        Self {
-            detail: detail.into(),
-            stack_entries: Vec::new(),
-        }
-    }
-
-    #[must_use]
-    pub fn with_stack(mut self, entries: impl Into<Vec<String>>) -> Self {
-        self.stack_entries = entries.into();
-        self
-    }
-}

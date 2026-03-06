@@ -18,21 +18,36 @@ pub struct Problem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trace_id: Option<String>,
     pub context: serde_json::Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub debug: Option<serde_json::Value>,
 }
 
 impl Problem {
-    /// Convert a `CanonicalError` to a `Problem`, omitting debug info (production mode).
+    /// Convert a `CanonicalError` to a `Problem`.
     #[must_use]
     pub fn from_error(err: &CanonicalError) -> Self {
-        Self::build(err, false)
-    }
+        let problem_type = err.gts_type().to_owned();
+        let title = err.title().to_owned();
+        let status = err.status_code();
+        let detail = err.message().to_owned();
 
-    /// Convert a `CanonicalError` to a `Problem`, including debug info if present.
-    #[must_use]
-    pub fn from_error_debug(err: &CanonicalError) -> Self {
-        Self::build(err, true)
+        let mut context = serialize_context(err);
+
+        if let Some(rt) = err.resource_type() {
+            context["resource_type"] = serde_json::Value::String(rt.to_owned());
+        }
+
+        if let Some(rn) = err.resource_name() {
+            context["resource_name"] = serde_json::Value::String(rn.to_owned());
+        }
+
+        Problem {
+            problem_type,
+            title,
+            status,
+            detail,
+            instance: None,
+            trace_id: None,
+            context,
+        }
     }
 
     /// Set the `trace_id` field, returning `self` for chaining.
@@ -47,37 +62,6 @@ impl Problem {
     pub fn with_instance(mut self, instance: impl Into<String>) -> Self {
         self.instance = Some(instance.into());
         self
-    }
-
-    fn build(err: &CanonicalError, include_debug: bool) -> Self {
-        let problem_type = err.gts_type().to_owned();
-        let title = err.title().to_owned();
-        let status = err.status_code();
-        let detail = err.message().to_owned();
-
-        let mut context = serialize_context(err);
-
-        if let Some(rt) = err.resource_type() {
-            context["resource_type"] = serde_json::Value::String(rt.to_owned());
-        }
-
-        let debug = if include_debug {
-            err.debug_info()
-                .map(|d| serde_json::to_value(d).unwrap_or_default())
-        } else {
-            None
-        };
-
-        Problem {
-            problem_type,
-            title,
-            status,
-            detail,
-            instance: None,
-            trace_id: None,
-            context,
-            debug,
-        }
     }
 }
 
