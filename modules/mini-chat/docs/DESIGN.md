@@ -1002,6 +1002,7 @@ Provider-specific streaming events are internal to `llm_provider` and the domain
 | Web search annotations in response | `event: citations` | Extracted from provider annotations, mapped to `items[]` with `source: "web"`, `url`, `title`, `snippet`. |
 | File search annotations in response | `event: citations` | Extracted from provider annotations, mapped to `items[]` schema. When provider annotations include ranges, `items[].span` SHOULD be populated as character offsets into the final assistant text. |
 | `response.completed` | `event: done` | `usage` from `response.usage`. Provider `response.id` is persisted internally (`chat_turns.provider_response_id`) but MUST NOT be included in the SSE payload. |
+| `response.incomplete` | `event: done` | A truncated but valid completion. `usage` is still taken from `response.usage`. The incomplete reason MUST be surfaced as a non-fatal completion signal (audit/outbox payload + metrics), and MUST NOT be written to `chat_turns.error_code`. Provider response ID may be absent depending on provider behavior. |
 | Provider HTTP error / disconnect | `event: error` (`code: "provider_error"` or `"provider_timeout"`) | Error details sanitized; provider internals not exposed. |
 | Provider 429 | `event: error` (`code: "rate_limited"`) | After OAGW retry exhaustion. |
 
@@ -3007,6 +3008,7 @@ The following metric series MUST be exposed (types and label sets shown). These 
 
 - `mini_chat_stream_started_total{provider,model}` (counter)
 - `mini_chat_stream_completed_total{provider,model}` (counter)
+- `mini_chat_stream_incomplete_total{provider,model,reason}` (counter; `reason` MUST be from the normative `CompletionSignalReason` enum; see §5.7 "Completion signal reason enum")
 - `mini_chat_stream_failed_total{provider,model,error_code}` (counter; `error_code` matches stable SSE `event: error` codes)
 - `mini_chat_stream_disconnected_total{stage}` (counter; `stage`: `before_first_token|mid_stream|after_done`)
 - `mini_chat_stream_replay_total{reason}` (counter; `reason`: `idempotent_completed`)
@@ -3259,7 +3261,7 @@ Every user-initiated streaming turn that reaches preflight reserve creation inse
 | State | Meaning | Terminal? |
 |-------|---------|-----------|
 | `running` | Generation in progress; SSE stream active | No |
-| `completed` | Provider returned terminal `response.completed`; assistant message persisted | Yes |
+| `completed` | Provider returned terminal `response.completed` **or** `response.incomplete`; assistant message persisted | Yes |
 | `failed` | Provider error, post-reserve preflight rejection, or orphan watchdog timeout | Yes |
 | `cancelled` | Client disconnected and cancellation propagated | Yes |
 
@@ -3271,7 +3273,7 @@ Allowed transitions: `running` → `completed` | `failed` | `cancelled`. No tran
 stateDiagram-v2
     [*] --> running: POST /messages:stream<br/>(creates chat_turns row)
 
-    running --> completed: Provider terminal done event<br/>(CAS: WHERE state='running')
+    running --> completed: Provider terminal done/incomplete event<br/>(response.completed or response.incomplete)<br/>(CAS: WHERE state='running')
     running --> failed: Provider terminal error<br/>(CAS: WHERE state='running')
     running --> cancelled: Client disconnect<br/>(CAS: WHERE state='running')
     running --> failed: Orphan watchdog timeout<br/>(error_code='orphan_timeout')<br/>(CAS: WHERE state='running')
@@ -3977,7 +3979,7 @@ The following terms are used throughout sections 5.4–5.9:
 >
 > **P2 Enhancement Option**: Add `chat_turns.provider_request_started_at TIMESTAMPTZ` column for perfect crash recovery if operational metrics show meaningful impact.
 
-- **Usage known**: the provider returned actual token counts (`usage.input_tokens`, `usage.output_tokens`) — either via a terminal `response.completed` event or via error metadata. Settlement uses `settlement_method = "actual"`.
+- **Usage known**: the provider returned actual token counts (`usage.input_tokens`, `usage.output_tokens`) — either via a terminal `response.completed` / `response.incomplete` event or via error metadata. Settlement uses `settlement_method = "actual"`.
 
 > **Canonical provider usage fields (normative)**: the authoritative usage metadata is read from the provider's terminal response event. The canonical field names are `usage.input_tokens` (integer, non-negative) and `usage.output_tokens` (integer, non-negative). These field names are part of the Mini-Chat ↔ OAGW contract. If a provider uses different field names (e.g., `prompt_tokens`, `completion_tokens`), OAGW MUST normalize them to `usage.input_tokens` / `usage.output_tokens` before returning the response to Mini-Chat. Mini-Chat MUST NOT implement provider-specific usage field mapping. If `usage` object is present but either field is missing, treat the missing field as `0`. If the `usage` object is absent entirely, usage is "unknown" (estimated settlement path).
 
@@ -4885,7 +4887,7 @@ Every turn MUST eventually settle into exactly one persisted finalization outcom
 
 | Outcome | Internal state | SSE terminal event | Description |
 |---------|---------------|-------------------|-------------|
-| `completed` | `completed` | `done` | Normal completion. Provider returned a full response and the full assistant message content is durably persisted (see content durability invariant below). |
+| `completed` | `completed` | `done` | Provider returned terminal `response.completed` or `response.incomplete`; assistant message content is durably persisted (see content durability invariant below). |
 | `failed` | `failed` | `error` | Terminal error (pre-provider or post-provider-start). |
 | `cancelled` | `cancelled` | _(none; stream already disconnected)_ | Server-side cancellation triggered by client disconnect or internal abort. |
 
@@ -4917,6 +4919,10 @@ Deterministic reconciliation for `ABORTED` and post-provider-start `FAILED` outc
 1. The CAS guard (conditional DB update)
 2. Quota settlement (actual or estimated)
 3. Outbox enqueue (in same transaction)
+
+**Clarification (normative):** “Single shared function” does NOT require a single DB update shape. The function MAY branch internally by terminal outcome:
+- For `completed` (including provider `response.incomplete`): finalize via the “completed” CAS path that sets `assistant_message_id` and MUST keep `chat_turns.error_code = NULL`. Any incomplete/truncation reason MUST be recorded only as `completion_signal` in audit/outbox payloads and the `mini_chat_stream_incomplete_total{reason}` metric.
+- For `failed` / `cancelled`: finalize via the “terminal state” CAS path that may set `error_code` / `error_detail` as specified elsewhere in this section.
 
 #### Dedupe Key Requirement for Quota-Bearing Events (Normative)
 
@@ -5002,7 +5008,7 @@ Exactly one finalizer may transition a turn from `IN_PROGRESS` (`running`) to a 
 
 **Covered terminal triggers** (exhaustive list — every trigger below MUST use the identical CAS pattern):
 
-1. **Provider done** — normal `response.completed` terminal event
+1. **Provider done** — terminal `response.completed` or `response.incomplete` event
 2. **Provider terminal error** — `provider_error`, `provider_timeout`, or any other terminal error from the provider
 3. **Client disconnect** — SSE stream closes before provider completes → abort path
 4. **Watchdog/orphan timeout** — turn remains `running` beyond the configured threshold (default: 5 minutes)
@@ -5123,15 +5129,32 @@ A turn MUST NOT transition to `completed` unless the full assistant message cont
 - Settle using actual provider usage (`response.usage.input_tokens` + `response.usage.output_tokens`).
 - Release unused reserve, commit actual usage to `quota_usage` bucket rows (bucket `total` always; bucket `tier:premium` if premium turn).
 - If actual exceeds estimate (overshoot), commit the overshoot; never retroactively cancel a completed response.
+- If the provider returns terminal `response.incomplete` (e.g. due to `max_tokens`), the turn is still treated as `completed` (assistant message persisted, settle on actual usage). The incomplete reason is a **non-fatal completion signal**: it MUST be recorded in the audit/outbox payload and metrics, and it MUST NOT be written to `chat_turns.error_code`.
 - Emit usage settlement outbox event with `payload_json` that MUST include:
   - `outcome`: `"completed"`
   - `settlement_method`: `"actual"`
   - `effective_model`, `selected_model`, `quota_decision` (and `downgrade_from`, `downgrade_reason` if present)
   - `policy_version_applied` (from `chat_turns.policy_version_applied`)
+  - `completion_signal` (nullable object): `null` for normal `response.completed`; for `response.incomplete`, set to `{ "kind": "incomplete", "reason": "<reason>" }` where `reason` is from the normative `CompletionSignalReason` enum (see "Completion signal reason enum" below)
+    - The corresponding turn audit event emitted to `audit_service` MUST include the same `completion_signal` object for correlation.
   - `usage`: `{ input_tokens, output_tokens }` (token-denominated; provider-reported actuals; telemetry)
   - `actual_credits_micro` (credit-denominated; **authoritative for CCM billing debit**; computed via `credits_micro()` formula in section 5.3 using the model multipliers from the policy snapshot identified by `policy_version_applied`)
   - `reserved_credits_micro` (credit-denominated; the preflight reserve from `chat_turns.reserved_credits_micro`; informational for delta/reconciliation)
   - `turn_id`, `request_id`, `chat_id`, `tenant_id`, `user_id`
+
+**Completion signal reason enum (normative)**:
+
+`completion_signal.reason` and the `reason` label on `mini_chat_stream_incomplete_total{reason}` MUST use this canonical allowlist:
+
+| `CompletionSignalReason` | Meaning | Provider mapping rule |
+|--------------------------|---------|------------------------|
+| `max_tokens` | Output truncated because the model hit the configured output token cap | Map provider finish reasons such as `max_tokens`, `length`, or equivalent “ran out of tokens” signals to `max_tokens` |
+| `content_filter` | Output truncated or stopped due to safety/content filtering | Map provider reasons indicating safety/content filtering to `content_filter` |
+| `other` | Any other incomplete reason not covered above | **Fallback**: any unknown/unmapped provider reason MUST be collapsed to `other` (no raw provider strings) |
+
+**Drift prevention rule (normative)**: implementations MUST NOT emit raw provider reason strings into audit/outbox payloads or metrics. The translation layer MUST normalize to the enum above.
+
+**Implementation note (non-normative):** service-internal stream summaries may still carry richer strings for logging/debugging (for example, an internal field like `StreamOutcome.error_code = "incomplete:<provider_reason>"`). These internal strings MUST NOT be persisted to `chat_turns.error_code` for `completed` turns and MUST NOT be used as the `reason` label value; only the normalized `CompletionSignalReason` enum may cross the audit/outbox and metrics boundaries.
 
 **Outbox payload unit convention (normative for all outcomes)**: every usage outbox event MUST include both `usage` (token-denominated, for telemetry and cost reporting) and `actual_credits_micro` (credit-denominated, authoritative for CCM debit). CCM MUST use `actual_credits_micro` as the amount to debit from the user's chat wallet. CCM MUST NOT independently recompute credits from token counts — `actual_credits_micro` is the source of truth.
 
@@ -5176,7 +5199,7 @@ When a provider request is issued (after preflight passes and before the first o
 
 | From | To | Trigger |
 |------|-----|---------|
-| `IN_PROGRESS` | `COMPLETED` | Provider returned terminal `response.completed` (`done` event) |
+| `IN_PROGRESS` | `COMPLETED` | Provider returned terminal `response.completed` **or** `response.incomplete` (both map to SSE `event: done`) |
 | `IN_PROGRESS` | `FAILED` | Provider returned a terminal error, or a pre-provider error occurred after reserve was taken |
 | `IN_PROGRESS` | `ABORTED` | Stream ended without `done` or `error`: client disconnect, pod crash, cancellation without terminal provider event, or orphan watchdog timeout |
 
@@ -5188,7 +5211,7 @@ Each turn MUST reach exactly one terminal billing state. Terminal states are imm
 stateDiagram-v2
     [*] --> IN_PROGRESS: Quota reserve taken<br/>(chat_turns.state = 'running')
 
-    IN_PROGRESS --> COMPLETED: Provider terminal done event<br/>(response.completed)
+    IN_PROGRESS --> COMPLETED: Provider terminal done/incomplete event<br/>(response.completed or response.incomplete)
     IN_PROGRESS --> FAILED: Provider terminal error<br/>OR pre-provider error after reserve
     IN_PROGRESS --> ABORTED: No provider terminal event<br/>(client disconnect, pod crash,<br/>orphan timeout, internal abort)
 
@@ -6013,7 +6036,8 @@ This endpoint accepts usage settlement events from MiniChat for finalized turn o
   "selected_model": "string",
   "effective_model": "string",
   "outcome": "completed | failed | aborted",
-  "settlement_method": "actual | estimated",
+  "settlement_method": "actual | estimated | released",
+  "completion_signal": null,
   "usage": {
     "input_tokens": 123,
     "output_tokens": 456
@@ -6023,6 +6047,8 @@ This endpoint accepts usage settlement events from MiniChat for finalized turn o
   "error_code": null
 }
 ```
+
+`completion_signal` is a nullable non-fatal completion signal. It MUST be `null` for normal completed turns and MUST be populated only when the provider returns `response.incomplete`, e.g. `{ "kind": "incomplete", "reason": "max_tokens" }` where `reason` is from the canonical `CompletionSignalReason` enum (see §5.7 "Completion signal reason enum"). It MUST NOT be used as an error indicator and MUST NOT imply `outcome != "completed"`.
 
 **Authority model**: MiniChat is the settlement authority: it computes `actual_credits_micro`. CCM is the ledger and balance authority.
 
