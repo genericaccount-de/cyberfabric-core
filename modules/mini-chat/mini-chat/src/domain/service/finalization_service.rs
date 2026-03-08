@@ -3,6 +3,8 @@ use std::sync::Arc;
 use modkit_macros::domain_model;
 use tracing::{debug, error, warn};
 
+use mini_chat_sdk::{UsageEvent, UsageTokens};
+
 use crate::domain::error::DomainError;
 use crate::domain::model::billing_outcome::{
     BillingDerivation, BillingDerivationInput, BillingOutcome, derive_billing_outcome,
@@ -10,9 +12,10 @@ use crate::domain::model::billing_outcome::{
 use crate::domain::model::finalization::{
     FinalizationInput, FinalizationOutcome, has_known_usage, settlement_path_from_billing,
 };
-use crate::domain::model::quota::SettlementInput;
+use crate::domain::model::quota::{SettlementInput, SettlementMethod, SettlementOutcome};
 use crate::domain::repos::{
-    CasTerminalParams, InsertAssistantMessageParams, MessageRepository, TurnRepository,
+    CasTerminalParams, InsertAssistantMessageParams, MessageRepository, OutboxEnqueuer,
+    TurnRepository,
 };
 use crate::domain::service::quota_settler::QuotaSettler;
 use crate::infra::db::entity::chat_turn::TurnState;
@@ -37,7 +40,7 @@ pub struct FinalizationService<TR: TurnRepository + 'static, MR: MessageReposito
     turn_repo: Arc<TR>,
     message_repo: Arc<MR>,
     quota_settler: Arc<dyn QuotaSettler>,
-    // TODO(P4): add Arc<dyn OutboxEnqueuer> once UsageEvent type is real (task 6.1)
+    outbox_enqueuer: Arc<dyn OutboxEnqueuer>,
 }
 
 impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> FinalizationService<TR, MR> {
@@ -46,12 +49,14 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
         turn_repo: Arc<TR>,
         message_repo: Arc<MR>,
         quota_settler: Arc<dyn QuotaSettler>,
+        outbox_enqueuer: Arc<dyn OutboxEnqueuer>,
     ) -> Self {
         Self {
             db,
             turn_repo,
             message_repo,
             quota_settler,
+            outbox_enqueuer,
         }
     }
 
@@ -119,6 +124,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
         let turn_repo = Arc::clone(&self.turn_repo);
         let message_repo = Arc::clone(&self.message_repo);
         let quota_settler = Arc::clone(&self.quota_settler);
+        let outbox_enqueuer = Arc::clone(&self.outbox_enqueuer);
         let input = input.clone();
 
         let tx_result = self
@@ -220,9 +226,11 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                     }
 
                     // 5. Enqueue outbox event via domain trait
-                    // TODO(P4): enqueue UsageEvent once real type exists (task 6.1)
-                    // let event = build_usage_event(&input, &billing, &settlement_outcome);
-                    // outbox_enqueuer.enqueue_usage_event(tx, event).await.map_err(to_db)?;
+                    let event = build_usage_event(&input, billing, &settlement_outcome);
+                    outbox_enqueuer
+                        .enqueue_usage_event(tx, event)
+                        .await
+                        .map_err(to_db)?;
 
                     // 6. Return outcome
                     Ok(FinalizationOutcome {
@@ -283,6 +291,43 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
     }
 }
 
+fn build_usage_event(
+    input: &FinalizationInput,
+    billing: BillingDerivation,
+    settlement: &SettlementOutcome,
+) -> UsageEvent {
+    let terminal_state = match input.terminal_state {
+        TurnState::Running => "running",
+        TurnState::Completed => "completed",
+        TurnState::Failed => "failed",
+        TurnState::Cancelled => "cancelled",
+    };
+    let settlement_method = match settlement.settlement_method {
+        SettlementMethod::Actual => "actual",
+        SettlementMethod::Estimated => "estimated",
+        SettlementMethod::Released => "released",
+    };
+    UsageEvent {
+        tenant_id: input.tenant_id,
+        user_id: input.user_id,
+        chat_id: input.chat_id,
+        turn_id: input.turn_id,
+        request_id: input.request_id,
+        effective_model: input.effective_model.clone(),
+        selected_model: input.selected_model.clone(),
+        terminal_state: terminal_state.to_owned(),
+        billing_outcome: billing.outcome.as_str().to_owned(),
+        usage: input.usage.map(|u| UsageTokens {
+            input_tokens: u.input_tokens.cast_unsigned(),
+            output_tokens: u.output_tokens.cast_unsigned(),
+        }),
+        actual_credits_micro: settlement.actual_credits_micro,
+        settlement_method: settlement_method.to_owned(),
+        policy_version_applied: input.policy_version_applied,
+        timestamp: time::OffsetDateTime::now_utc(),
+    }
+}
+
 /// Internal error type to distinguish message persistence failure
 /// from other domain errors, enabling the retry-as-failed logic.
 #[domain_model]
@@ -329,6 +374,22 @@ mod tests {
         }
     }
 
+    // ── Noop OutboxEnqueuer ──
+
+    #[domain_model]
+    struct NoopOutboxEnqueuer;
+
+    #[async_trait::async_trait]
+    impl OutboxEnqueuer for NoopOutboxEnqueuer {
+        async fn enqueue_usage_event(
+            &self,
+            _runner: &(dyn modkit_db::secure::DBRunner + Sync),
+            _event: mini_chat_sdk::UsageEvent,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+    }
+
     fn build_finalization_service(db: Arc<DbProvider>) -> FinalizationService<TurnRepo, MsgRepo> {
         FinalizationService::new(
             db,
@@ -338,6 +399,7 @@ mod tests {
                 max: 100,
             })),
             Arc::new(MockQuotaSettler),
+            Arc::new(NoopOutboxEnqueuer),
         )
     }
 
@@ -567,6 +629,7 @@ mod tests {
                 max: 100,
             })),
             Arc::new(FailingQuotaSettler),
+            Arc::new(NoopOutboxEnqueuer),
         );
 
         let tenant_id = Uuid::new_v4();

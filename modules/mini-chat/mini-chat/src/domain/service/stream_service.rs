@@ -1682,6 +1682,19 @@ mod tests {
             }
         }
 
+        #[domain_model]
+        struct NoopOutboxEnqueuer;
+        #[async_trait::async_trait]
+        impl crate::domain::repos::OutboxEnqueuer for NoopOutboxEnqueuer {
+            async fn enqueue_usage_event(
+                &self,
+                _runner: &(dyn modkit_db::secure::DBRunner + Sync),
+                _event: mini_chat_sdk::UsageEvent,
+            ) -> Result<(), crate::domain::error::DomainError> {
+                Ok(())
+            }
+        }
+
         let provider_resolver = Arc::new(ProviderResolver::single_provider(provider));
         let turn_repo = Arc::new(TurnRepo);
         let message_repo = Arc::new(MsgRepo::new(modkit_db::odata::LimitCfg {
@@ -1693,6 +1706,7 @@ mod tests {
             Arc::clone(&turn_repo),
             Arc::clone(&message_repo),
             Arc::new(MockQuotaSettler) as Arc<dyn QuotaSettler>,
+            Arc::new(NoopOutboxEnqueuer) as Arc<dyn crate::domain::repos::OutboxEnqueuer>,
         ));
 
         // QuotaService with permissive defaults — model catalog includes
@@ -2452,6 +2466,19 @@ mod tests {
             }
         }
 
+        #[allow(de0309_must_have_domain_model)]
+        struct NoopOutboxEnqueuer2;
+        #[async_trait::async_trait]
+        impl crate::domain::repos::OutboxEnqueuer for NoopOutboxEnqueuer2 {
+            async fn enqueue_usage_event(
+                &self,
+                _runner: &(dyn modkit_db::secure::DBRunner + Sync),
+                _event: mini_chat_sdk::UsageEvent,
+            ) -> Result<(), crate::domain::error::DomainError> {
+                Ok(())
+            }
+        }
+
         let db = mock_db_provider(inmem_db().await);
         let tenant_id = Uuid::new_v4();
         let user_id = Uuid::new_v4();
@@ -2497,6 +2524,7 @@ mod tests {
             Arc::clone(&turn_repo_arc),
             Arc::clone(&message_repo_arc),
             Arc::new(NoopSettler) as Arc<dyn QuotaSettler>,
+            Arc::new(NoopOutboxEnqueuer2) as Arc<dyn crate::domain::repos::OutboxEnqueuer>,
         ));
 
         let fctx = FinalizationCtx {
@@ -2628,6 +2656,19 @@ mod tests {
             }
         }
 
+        #[allow(de0309_must_have_domain_model)]
+        struct NoopOutboxEnqueuer3;
+        #[async_trait::async_trait]
+        impl crate::domain::repos::OutboxEnqueuer for NoopOutboxEnqueuer3 {
+            async fn enqueue_usage_event(
+                &self,
+                _runner: &(dyn modkit_db::secure::DBRunner + Sync),
+                _event: mini_chat_sdk::UsageEvent,
+            ) -> Result<(), crate::domain::error::DomainError> {
+                Ok(())
+            }
+        }
+
         let provider_resolver = Arc::new(ProviderResolver::single_provider(provider));
         let turn_repo = Arc::new(TurnRepo);
         let message_repo = Arc::new(MsgRepo::new(modkit_db::odata::LimitCfg {
@@ -2639,6 +2680,7 @@ mod tests {
             Arc::clone(&turn_repo),
             Arc::clone(&message_repo),
             Arc::new(MockQuotaSettler) as Arc<dyn QuotaSettler>,
+            Arc::new(NoopOutboxEnqueuer3) as Arc<dyn crate::domain::repos::OutboxEnqueuer>,
         ));
 
         let quota_svc = Arc::new(crate::domain::service::QuotaService::new(

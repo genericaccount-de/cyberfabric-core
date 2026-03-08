@@ -7,12 +7,13 @@ use modkit_macros::domain_model;
 
 use crate::config::{EstimationBudgets, QuotaConfig, StreamingConfig};
 use crate::domain::repos::{
-    AttachmentRepository, ChatRepository, MessageRepository, ModelResolver, PolicySnapshotProvider,
-    QuotaUsageRepository, ReactionRepository, ThreadSummaryRepository, TurnRepository,
-    UserLimitsProvider, VectorStoreRepository,
+    AttachmentRepository, ChatRepository, MessageRepository, ModelResolver, OutboxEnqueuer,
+    PolicySnapshotProvider, QuotaUsageRepository, ReactionRepository, ThreadSummaryRepository,
+    TurnRepository, UserLimitsProvider, VectorStoreRepository,
 };
 use crate::domain::service::quota_settler::QuotaSettler;
 use crate::infra::llm::provider_resolver::ProviderResolver;
+use crate::infra::outbox::InfraOutboxEnqueuer;
 
 mod attachment_service;
 mod chat_service;
@@ -168,11 +169,14 @@ impl<
             quota_config,
         ));
 
+        let outbox_enqueuer: Arc<dyn OutboxEnqueuer> = Arc::new(InfraOutboxEnqueuer::new());
+
         let finalization = Arc::new(FinalizationService::new(
             Arc::clone(&db),
             Arc::clone(&repos.turn),
             Arc::clone(&repos.message),
             Arc::clone(&quota_svc) as Arc<dyn QuotaSettler>,
+            outbox_enqueuer,
         ));
 
         let turns = TurnService::new(

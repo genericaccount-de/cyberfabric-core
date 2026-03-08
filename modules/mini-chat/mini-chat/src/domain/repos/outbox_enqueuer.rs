@@ -15,7 +15,7 @@ use crate::domain::error::DomainError;
 /// `Vec<u8>` payloads. Mini-Chat needs a domain-oriented interface that:
 /// - Accepts a typed `UsageEvent` (from `mini-chat-sdk`; serialized by the implementation)
 /// - Resolves the queue name and partition from tenant context
-/// - Participates in the caller's transaction via `&impl DBRunner`
+/// - Participates in the caller's transaction via `&dyn DBRunner`
 /// - Returns domain errors, not infra-level `OutboxError`
 ///
 /// # Payload type
@@ -30,10 +30,8 @@ use crate::domain::error::DomainError;
 /// `Arc<modkit_db::outbox::Outbox>` and call `outbox.enqueue(runner, ...)`
 /// within the finalization transaction. The `Outbox::flush()` notification
 /// is sent after the transaction commits (by the finalization service).
-// TODO(P4): implement InfraOutboxEnqueuer backed by modkit_db::outbox::Outbox
-// TODO(P4): Wire into FinalizationService once modkit_db::outbox is merged.
+// TODO: implement InfraOutboxEnqueuer backed by modkit_db::outbox::Outbox
 #[async_trait::async_trait]
-#[allow(dead_code)]
 pub trait OutboxEnqueuer: Send + Sync {
     /// Enqueue a usage event within the caller's transaction.
     ///
@@ -47,9 +45,9 @@ pub trait OutboxEnqueuer: Send + Sync {
     /// transaction — the outbox enqueue is only reached by the CAS winner.
     ///
     /// Returns `Ok(())` on success. Returns `Err` on database error.
-    async fn enqueue_usage_event<C: DBRunner>(
+    async fn enqueue_usage_event(
         &self,
-        runner: &C,
+        runner: &(dyn DBRunner + Sync),
         event: UsageEvent,
     ) -> Result<(), DomainError>;
 }
