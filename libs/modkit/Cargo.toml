@@ -45,7 +45,6 @@ bootstrap = [
     "dep:file-rotate",
     "dep:tracing-log",
     "dep:chrono",
-    "dep:regex",
     "dep:url",
     "dep:dsn",
     "dep:supports-color",
@@ -72,7 +71,7 @@ file-rotate = { workspace = true, optional = true }
 chrono = { workspace = true, optional = true }
 url = { workspace = true, optional = true }
 dsn = { workspace = true, optional = true }
-regex = { workspace = true, optional = true }
+modkit-utils = { workspace = true }
 
 tokio = { workspace = true }
 tokio-util = { workspace = true }

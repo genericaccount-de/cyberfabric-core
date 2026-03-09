@@ -1296,6 +1296,7 @@ dependencies = [
  "cf-modkit-macros",
  "cf-modkit-odata",
  "cf-modkit-sdk",
+ "cf-modkit-utils",
  "cf-system-sdks",
  "chrono",
  "dashmap",
@@ -1315,7 +1316,6 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "parking_lot",
- "regex",
  "schemars 1.2.1",
  "sea-orm-migration",
  "serde",
@@ -1389,7 +1389,6 @@ dependencies = [
  "dashmap",
  "dirs",
  "figment",
- "regex",
  "rust_decimal",
  "ryu",
  "sea-orm",
@@ -1503,6 +1502,7 @@ dependencies = [
  "cf-modkit-security",
  "cf-modkit-transport-grpc",
  "inventory",
+ "serde",
  "tokio",
  "tokio-util",
  "tonic",
@@ -1607,8 +1607,10 @@ name = "cf-modkit-utils"
 version = "0.4.1"
 dependencies = [
  "humantime",
+ "regex",
  "serde",
  "serde_json",
+ "temp-env",
  "zeroize",
 ]
 

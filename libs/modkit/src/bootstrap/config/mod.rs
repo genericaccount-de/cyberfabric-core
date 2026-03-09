@@ -396,23 +396,7 @@ fn merge_module_files(
 /// # Errors
 /// Returns an error if any referenced env var is missing.
 pub fn expand_env_in_dsn(dsn: &str) -> Result<String> {
-    use std::env;
-
-    let mut result = dsn.to_owned();
-    // TODO: Think about other way
-    let re = regex::Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)}")?;
-
-    for cap in re.captures_iter(dsn) {
-        let full_match = &cap[0];
-        let var_name = &cap[1];
-
-        let value = env::var(var_name)
-            .with_context(|| format!("Environment variable '{var_name}' not found in DSN"))?;
-
-        result = result.replace(full_match, &value);
-    }
-
-    Ok(result)
+    modkit_utils::var_expand::expand_env_vars(dsn).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// Resolves password: if it contains ${VAR}, expands from environment variable; otherwise returns as-is.

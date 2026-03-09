@@ -59,7 +59,7 @@ impl Module for MiniChatModule {
     async fn init(&self, ctx: &ModuleCtx) -> anyhow::Result<()> {
         info!("Initializing {} module", Self::MODULE_NAME);
 
-        let cfg: crate::config::MiniChatConfig = ctx.config()?;
+        let cfg: crate::config::MiniChatConfig = ctx.config_expanded()?;
         cfg.streaming
             .validate()
             .map_err(|e| anyhow::anyhow!("streaming config: {e}"))?;

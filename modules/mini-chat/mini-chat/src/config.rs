@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::infra::llm::ProviderKind;
 use crate::module::DEFAULT_URL_PREFIX;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, modkit_macros::ExpandVars)]
 #[serde(deny_unknown_fields)]
 pub struct MiniChatConfig {
     #[serde(default = "default_url_prefix")]
@@ -21,12 +21,13 @@ pub struct MiniChatConfig {
     #[serde(default)]
     pub outbox: OutboxConfig,
     /// Provider registry. Key = `provider_id` (matches [`ModelCatalogEntry::provider_id`]).
+    #[expand_vars]
     #[serde(default = "default_providers")]
     pub providers: HashMap<String, ProviderEntry>,
 }
 
 /// Configuration for a single LLM provider.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, modkit_macros::ExpandVars)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderEntry {
     /// Which adapter to use (e.g., `openai_responses`, `openai_chat_completions`).
@@ -49,6 +50,8 @@ pub struct ProviderEntry {
     #[serde(default)]
     pub auth_plugin_type: Option<String>,
     /// Auth plugin config (e.g., `header`, `prefix`, `secret_ref`).
+    /// Values support `${VAR}` env expansion via [`config_expanded()`].
+    #[expand_vars]
     #[serde(default)]
     pub auth_config: Option<HashMap<String, String>>,
 }
