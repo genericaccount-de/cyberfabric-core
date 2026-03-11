@@ -2,7 +2,7 @@ use crate::{claims_error::ClaimsError, traits::KeyProvider};
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use jsonwebtoken::{DecodingKey, Header, Validation, decode, decode_header};
+use jsonwebtoken::{DecodingKey, Header, crypto::verify as jwt_verify_signature, decode_header};
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -340,27 +340,47 @@ impl JwksKeyProvider {
         keys.get(kid).cloned()
     }
 
-    /// Validate JWT and decode into header + raw claims
-    fn validate_token(
+    /// Verify JWT signature only
+    fn verify_signature(
         token: &str,
         key: &DecodingKey,
         header: &Header,
-    ) -> Result<Value, ClaimsError> {
-        let mut validation = Validation::new(header.alg);
+    ) -> Result<(), ClaimsError> {
+        let mut parts = token.rsplitn(2, '.');
+        let signature = parts
+            .next()
+            .ok_or_else(|| ClaimsError::DecodeFailed("Invalid JWT: missing signature".into()))?;
+        let message = parts
+            .next()
+            .ok_or_else(|| ClaimsError::DecodeFailed("Invalid JWT: missing payload".into()))?;
 
-        // Disable all built-in validations - we'll do them separately
-        validation.validate_exp = false;
-        validation.validate_nbf = false;
-        validation.validate_aud = false;
-
-        // Don't require any standard claims
-        let empty_claims: &[&str] = &[];
-        validation.set_required_spec_claims(empty_claims);
-
-        let token_data = decode::<Value>(token, key, &validation)
+        let valid = jwt_verify_signature(signature, message.as_bytes(), key, header.alg)
             .map_err(|e| ClaimsError::DecodeFailed(format!("JWT validation failed: {e}")))?;
 
-        Ok(token_data.claims)
+        if !valid {
+            return Err(ClaimsError::DecodeFailed(
+                "JWT validation failed: InvalidSignature".into(),
+            ));
+        }
+
+        Ok(())
+    }
+
+    /// Decode JWT claims from the payload part (skipping the header)
+    fn decode_claims(token: &str) -> Result<Value, ClaimsError> {
+        let payload = token
+            .splitn(3, '.')
+            .nth(1)
+            .ok_or_else(|| ClaimsError::DecodeFailed("Invalid JWT: missing payload".into()))?;
+
+        let bytes = URL_SAFE_NO_PAD
+            .decode(payload.trim_end_matches('='))
+            .map_err(|e| {
+                ClaimsError::DecodeFailed(format!("JWT payload base64 decode failed: {e}"))
+            })?;
+
+        serde_json::from_slice(&bytes)
+            .map_err(|e| ClaimsError::DecodeFailed(format!("JWT payload JSON parse failed: {e}")))
     }
 }
 
@@ -398,8 +418,10 @@ impl KeyProvider for JwksKeyProvider {
                 .ok_or_else(|| ClaimsError::UnknownKeyId(kid.clone()))?
         };
 
-        // Validate signature and decode claims
-        let claims = Self::validate_token(token, &key, &header)?;
+        // Verify signature, then decode claims from payload
+        // It is done in two separate functions because jsonwebtoken::
+        Self::verify_signature(token, &key, &header)?;
+        let claims = Self::decode_claims(token)?;
 
         Ok((header, claims))
     }
@@ -1020,5 +1042,140 @@ mod tests {
             err.contains("invalid type: integer"),
             "expected type error, got: {err}"
         );
+    }
+
+    // ==================== verify_signature tests ====================
+
+    #[test]
+    fn test_verify_signature_valid_hmac() {
+        let secret = b"super-secret-key";
+        let key = DecodingKey::from_secret(secret);
+        let header = Header {
+            alg: jsonwebtoken::Algorithm::HS256,
+            ..Default::default()
+        };
+
+        // Build a valid HMAC-signed token
+        let header_b64 = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload_b64 = URL_SAFE_NO_PAD.encode(br#"{"sub":"1234"}"#);
+        let message = format!("{header_b64}.{payload_b64}");
+
+        let sig = jsonwebtoken::crypto::sign(message.as_bytes(), &jsonwebtoken::EncodingKey::from_secret(secret), jsonwebtoken::Algorithm::HS256)
+            .expect("signing should succeed");
+
+        let token = format!("{message}.{sig}");
+
+        let result = JwksKeyProvider::verify_signature(&token, &key, &header);
+        assert!(result.is_ok(), "Expected valid signature, got: {result:?}");
+    }
+
+    #[test]
+    fn test_verify_signature_rejects_invalid_signature() {
+        let key = DecodingKey::from_secret(b"super-secret-key");
+        let header = Header {
+            alg: jsonwebtoken::Algorithm::HS256,
+            ..Default::default()
+        };
+
+        let header_b64 = URL_SAFE_NO_PAD.encode(br#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload_b64 = URL_SAFE_NO_PAD.encode(br#"{"sub":"1234"}"#);
+        let token = format!("{header_b64}.{payload_b64}.invalidsignature");
+
+        let result = JwksKeyProvider::verify_signature(&token, &key, &header);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ClaimsError::DecodeFailed(msg) => {
+                assert!(
+                    msg.contains("JWT validation failed"),
+                    "Expected validation error, got: {msg}"
+                );
+            }
+            other => panic!("Expected DecodeFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_verify_signature_rejects_token_without_dots() {
+        let key = DecodingKey::from_secret(b"secret");
+        let header = Header {
+            alg: jsonwebtoken::Algorithm::HS256,
+            ..Default::default()
+        };
+
+        let result = JwksKeyProvider::verify_signature("nodots", &key, &header);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ClaimsError::DecodeFailed(msg) => {
+                assert!(
+                    msg.contains("missing payload"),
+                    "Expected missing payload error, got: {msg}"
+                );
+            }
+            other => panic!("Expected DecodeFailed, got: {other:?}"),
+        }
+    }
+
+    // ==================== decode_claims tests ====================
+
+    #[test]
+    fn test_decode_claims_success() {
+        let payload_json = r#"{"sub":"user-1","name":"Alice"}"#;
+        let header_b64 = URL_SAFE_NO_PAD.encode(br#"{"alg":"RS256"}"#);
+        let payload_b64 = URL_SAFE_NO_PAD.encode(payload_json.as_bytes());
+        let token = format!("{header_b64}.{payload_b64}.signature");
+
+        let claims = JwksKeyProvider::decode_claims(&token)
+            .expect("decode_claims should succeed");
+
+        assert_eq!(claims.get("sub").and_then(Value::as_str), Some("user-1"));
+        assert_eq!(claims.get("name").and_then(Value::as_str), Some("Alice"));
+    }
+
+    #[test]
+    fn test_decode_claims_missing_payload() {
+        let result = JwksKeyProvider::decode_claims("headeronly");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ClaimsError::DecodeFailed(msg) => {
+                assert!(
+                    msg.contains("missing payload"),
+                    "Expected missing payload error, got: {msg}"
+                );
+            }
+            other => panic!("Expected DecodeFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_claims_invalid_base64() {
+        let token = "header.!!!invalid-base64!!!.signature";
+        let result = JwksKeyProvider::decode_claims(token);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ClaimsError::DecodeFailed(msg) => {
+                assert!(
+                    msg.contains("base64 decode failed"),
+                    "Expected base64 error, got: {msg}"
+                );
+            }
+            other => panic!("Expected DecodeFailed, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_decode_claims_invalid_json() {
+        let payload_b64 = URL_SAFE_NO_PAD.encode(b"not-json");
+        let token = format!("header.{payload_b64}.signature");
+        let result = JwksKeyProvider::decode_claims(&token);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ClaimsError::DecodeFailed(msg) => {
+                assert!(
+                    msg.contains("JSON parse failed"),
+                    "Expected JSON parse error, got: {msg}"
+                );
+            }
+            other => panic!("Expected DecodeFailed, got: {other:?}"),
+        }
     }
 }
