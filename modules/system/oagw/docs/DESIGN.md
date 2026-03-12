@@ -387,11 +387,12 @@ Alias behavior is determined entirely by endpoint type. The system enforces stri
 |---|---|---|
 | Hostname, standard port | Auto-derived (hostname) | `api.openai.com:443` → `api.openai.com` |
 | Hostname, non-standard port | Auto-derived (hostname:port) | `api.openai.com:8443` → `api.openai.com:8443` |
-| Multiple hostnames, common suffix (≥2 labels) | Auto-derived (common suffix) | `us.vendor.com`, `eu.vendor.com` → `vendor.com` |
-| Multiple hostnames, no common suffix | Explicit alias **required** | `us.foo.com`, `eu.bar.com` → user must provide alias |
+| Multiple hostnames, registrable common suffix (PSL-validated) | Auto-derived via `common_domain_suffix()` — shared suffix must be a registrable domain (≥2 labels, not a bare public suffix) | `us.vendor.com`, `eu.vendor.com` → `vendor.com` |
+| Multiple hostnames, common suffix is a bare public suffix | Explicit alias **required** (derivation rejected) | `foo.co.uk`, `bar.co.uk` → **not** derivable (`co.uk` is a public suffix) |
+| Multiple hostnames, no registrable common suffix | Explicit alias **required** | `us.foo.com`, `eu.bar.com` → user must provide alias |
 | IP addresses | Explicit alias **required** | `10.0.1.1`, `10.0.1.2` → user provides `my-service` |
 
-**Hostname-based endpoints**: alias is always auto-derived. User-provided alias is **rejected** (400 Validation). Providing the exact derived value is tolerated silently for idempotency.
+**Hostname-based endpoints**: alias is always auto-derived. User-provided alias that differs from the auto-derived value is **rejected** (400 Validation); providing the exact derived value is tolerated silently for idempotency.
 
 **IP-based or non-derivable endpoints**: explicit alias is **required** from the user. Omitting the alias field returns 400 Validation.
 
@@ -405,12 +406,14 @@ Alias behavior is determined entirely by endpoint type. The system enforces stri
 
 | Transition | Behavior |
 |---|---|
-| Hostname → Hostname (new host) | Alias recomputed from new endpoints |
-| Hostname → IP | **Rejected** unless user provides explicit alias |
-| IP → IP | Existing alias retained; user may provide a new one |
-| IP → Hostname | Alias recomputed (old explicit alias replaced) |
-| Hostname (no endpoint change) | Alias override **rejected** (400 Validation) |
-| IP (no endpoint change) | User may update alias freely |
+| Derivable → Derivable (new endpoints) | Alias recomputed from new endpoints |
+| Derivable → Non-derivable | **Rejected** unless user provides explicit alias |
+| Non-derivable → Non-derivable | Existing alias retained; user may provide a new one |
+| Non-derivable → Derivable | Alias recomputed (old explicit alias replaced) |
+| Derivable (no endpoint change) | Alias override **rejected** (400 Validation) |
+| Non-derivable (no endpoint change) | User may update alias freely |
+
+"Derivable" means `compute_derived_alias()` returns a value (single hostname, or multiple hostnames with a registrable common suffix). "Non-derivable" means derivation fails — this includes IP-based endpoints, heterogeneous hostnames with no common suffix, and hostname pools whose only common suffix is a bare public suffix (e.g., `co.uk`). See `enforce_alias_update()` for the full branching logic.
 
 For multi-host endpoints with non-standard ports, the common suffix derivation preserves `:port` in the alias (e.g., `us.vendor.com:8443` + `eu.vendor.com:8443` → `vendor.com:8443`). This avoids collisions between pools sharing the same domain suffix on different ports — operators should reference the `suffix:port` form when routing to these upstreams.
 

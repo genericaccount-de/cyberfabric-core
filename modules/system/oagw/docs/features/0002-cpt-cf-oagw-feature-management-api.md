@@ -275,7 +275,7 @@ Alias behavior is determined entirely by endpoint type. Hostname-based endpoints
 2. [x] - `p1` - **IF** derivable (hostname-based) - `inst-alias-2`
    1. [x] - `p1` - **IF** user provided explicit alias AND it differs from derived value - `inst-alias-2a`
       1. [x] - `p1` - **RETURN** 400 Validation: "alias is auto-derived for hostname-based endpoints" - `inst-alias-2a1`
-   2. [x] - `p1` - **RETURN** derived alias (normalized: lowercase, trailing dot stripped) - `inst-alias-2b`
+   2. [x] - `p1` - **RETURN** derived alias (normalized: lowercase, trailing dots stripped) - `inst-alias-2b`
 3. [x] - `p1` - **IF** not derivable (IP-based or no common suffix) - `inst-alias-3`
    1. [x] - `p1` - **IF** no explicit alias provided - `inst-alias-3a`
       1. [x] - `p1` - **RETURN** 400 Validation: "explicit alias is required for IP-based or heterogeneous-host endpoints" - `inst-alias-3a1`
@@ -286,9 +286,9 @@ Alias behavior is determined entirely by endpoint type. Hostname-based endpoints
 1. [x] - `p1` - Determine old and new endpoint derivability - `inst-alias-upd-1`
 2. [x] - `p1` - **IF** new endpoints are hostname-based (derivable) - `inst-alias-upd-2`
    1. [x] - `p1` - Recompute alias from new endpoints; reject user-provided alias if different - `inst-alias-upd-2a`
-3. [x] - `p1` - **IF** old hostname → new IP (hostname→IP transition) - `inst-alias-upd-3`
+3. [x] - `p1` - **IF** old derivable → new non-derivable (derivable→non-derivable transition) - `inst-alias-upd-3`
    1. [x] - `p1` - **IF** no explicit alias provided - `inst-alias-upd-3a`
-      1. [x] - `p1` - **RETURN** 400 Validation: "endpoints changed from hostname to IP-based; an explicit alias must be provided" - `inst-alias-upd-3a1`
+      1. [x] - `p1` - **RETURN** 400 Validation: "explicit alias is required for IP-based or heterogeneous-host endpoints" - `inst-alias-upd-3a1`
    2. [x] - `p1` - **RETURN** normalized user alias - `inst-alias-upd-3b`
 4. [x] - `p1` - **IF** IP → IP (no transition) - `inst-alias-upd-4`
    1. [x] - `p1` - Retain existing alias unless user provides a new one - `inst-alias-upd-4a`
@@ -455,7 +455,7 @@ The system **MUST** return all management API errors in RFC 9457 Problem Details
 
 - [ ] Upstream CRUD: create, read (single + list), update, and delete operations work with tenant scoping via secure ORM
 - [ ] Route CRUD: create, read (single + list), update, and delete operations work with upstream reference validation and tenant scoping
-- [x] Alias enforcement: hostname-based endpoints auto-derive alias (user-provided rejected); IP-based/non-derivable require explicit alias; aliases normalized (lowercase, trailing dot stripped); update re-enforces on endpoint change per transition rules
+- [x] Alias enforcement: hostname-based endpoints auto-derive alias (user-provided rejected); IP-based/non-derivable require explicit alias; aliases normalized (lowercase, trailing dots stripped); update re-enforces on endpoint change per transition rules
 - [x] Hostname validation: RFC 1123 (max 253 chars, labels 1–63 chars, ASCII alphanumeric + hyphen, no leading/trailing hyphen)
 - [ ] `(tenant_id, alias)` uniqueness enforced at database level; 409 Conflict returned on violation
 - [ ] OData $filter, $select, $orderby, $top (default 50, max 100), $skip supported on list endpoints; invalid syntax returns 400

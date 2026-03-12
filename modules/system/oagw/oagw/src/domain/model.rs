@@ -53,11 +53,13 @@ impl Endpoint {
         }
     }
 
-    /// The normalized host for alias derivation: lowercased, trailing dot stripped.
+    /// The normalized host for alias derivation: lowercased, trailing dots stripped.
     #[must_use]
     pub fn normalized_host(&self) -> String {
-        let h = self.host.to_ascii_lowercase();
-        h.strip_suffix('.').unwrap_or(&h).to_string()
+        self.host
+            .to_ascii_lowercase()
+            .trim_end_matches('.')
+            .to_string()
     }
 
     /// Single-endpoint alias contribution: `host` if standard port, `host:port` otherwise.

@@ -705,7 +705,8 @@ fn validate_hostname(index: usize, host: &str) -> Result<(), DomainError> {
 /// Maximum length for an upstream alias.
 const MAX_ALIAS_LENGTH: usize = 253;
 
-/// Validate an alias: non-empty, max length, safe charset (alphanumeric + `.:-_`).
+/// Validate an alias: non-empty, max length, safe charset (alphanumeric + `.:-_`),
+/// must contain at least one alphanumeric character, and must not be a dot-segment.
 fn validate_alias(alias: &str) -> Result<(), DomainError> {
     if alias.is_empty() {
         return Err(DomainError::validation("alias must not be empty"));
@@ -723,6 +724,18 @@ fn validate_alias(alias: &str) -> Result<(), DomainError> {
             "alias contains invalid characters; only alphanumeric, '.', ':', '-', '_' are allowed",
         ));
     }
+    // Reject dot-segments and punctuation-only aliases to prevent path traversal
+    // and ambiguous URL segments in /proxy/{alias}/{path}.
+    if alias == "." || alias == ".." {
+        return Err(DomainError::validation(
+            "alias must not be a dot-segment ('.' or '..')",
+        ));
+    }
+    if !alias.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return Err(DomainError::validation(
+            "alias must contain at least one alphanumeric character",
+        ));
+    }
     Ok(())
 }
 
@@ -736,10 +749,9 @@ fn strip_brackets(host: &str) -> &str {
 
 /// Normalize an alias to lowercase. Hostname trailing dots are already
 /// handled by `Endpoint::normalized_host()` during derivation; this covers
-/// user-provided explicit aliases.
+/// user-provided explicit aliases. All trailing dots are stripped.
 fn normalize_alias(alias: &str) -> String {
-    let lower = alias.to_ascii_lowercase();
-    lower.strip_suffix('.').unwrap_or(&lower).to_string()
+    alias.to_ascii_lowercase().trim_end_matches('.').to_string()
 }
 
 /// Check whether the given endpoints are all IP addresses.
@@ -900,7 +912,7 @@ fn enforce_alias_update(
     match (old_derivable, &new_derived) {
         // New endpoints are hostname-derivable: recompute alias.
         // Covers hostname→hostname (recompute) and IP→hostname (old explicit alias replaced).
-        (true, Some(derived)) | (false, Some(derived)) => {
+        (_, Some(derived)) => {
             if let Some(user) = user_alias {
                 let normalized_user = normalize_alias(user);
                 if normalized_user != *derived {
@@ -912,12 +924,11 @@ fn enforce_alias_update(
             }
             Ok(derived.clone())
         }
-        // hostname → IP: must provide explicit alias.
+        // derivable → non-derivable: must provide explicit alias.
         (true, None) => {
             let alias = user_alias.ok_or_else(|| {
                 DomainError::validation(
-                    "endpoints changed from hostname to IP-based; \
-                     an explicit alias must be provided",
+                    "explicit alias is required for IP-based or heterogeneous-host endpoints",
                 )
             })?;
             let normalized = normalize_alias(alias);
@@ -3490,6 +3501,22 @@ mod tests {
     #[test]
     fn normalize_alias_strips_trailing_dot() {
         assert_eq!(normalize_alias("api.example.com."), "api.example.com");
+    }
+
+    #[test]
+    fn normalize_alias_strips_multiple_trailing_dots() {
+        assert_eq!(normalize_alias("svc.."), "svc");
+        assert_eq!(normalize_alias("svc..."), "svc");
+    }
+
+    #[test]
+    fn normalized_host_strips_multiple_trailing_dots() {
+        let ep = Endpoint {
+            scheme: Scheme::Https,
+            host: "Api.Example.COM..".into(),
+            port: 443,
+        };
+        assert_eq!(ep.normalized_host(), "api.example.com");
     }
 
     #[test]
