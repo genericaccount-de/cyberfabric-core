@@ -90,7 +90,10 @@ resolver = "3"
 [workspace.lints.rust]
 deprecated = "warn"
 non_ascii_idents = "forbid"
-unsafe_code = "forbid"
+# `deny` (not `forbid`) so that the Windows profiling sampler in modkit can
+# locally `#[allow(unsafe_code)]` for Win32 FFI.  Every other module remains
+# effectively forbidden because `deny` triggers the same compile error.
+unsafe_code = "deny"
 unused_mut = "warn"
 noop_method_call = "warn"
 unused_import_braces = "warn"
@@ -505,6 +508,10 @@ nanoid = "0.4"
 
 # Metrics
 tokio-metrics = { version = "0.4", features = ["rt"] }
+
+# Profiling (CPU sampling)
+pprof = { version = "0.15", default-features = false, features = ["flamegraph"] }
+backtrace = "0.3"
 
 # GTS dependencies
 jsonschema = "0.40"

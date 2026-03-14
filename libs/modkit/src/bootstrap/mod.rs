@@ -22,7 +22,7 @@ pub mod oop;
 // Re-export commonly used config types at crate root for convenience
 pub use config::{
     AppConfig, CliArgs, ConsoleFormat, LoggingConfig, MODKIT_MODULE_CONFIG_ENV, ModuleConfig,
-    ModuleRuntime, RenderedModuleConfig, RuntimeKind, Section, ServerConfig,
+    ModuleRuntime, ProfilingConfig, RenderedModuleConfig, RuntimeKind, Section, ServerConfig,
     dump_effective_modules_config_json, dump_effective_modules_config_yaml, list_module_names,
     render_effective_modules_config,
 };

@@ -51,6 +51,17 @@ bootstrap = [
     "dep:enable-ansi-support",
 ]
 
+# On-demand CPU profiling endpoint (pprof-compatible).
+# Linux/macOS: CPU sampling via pprof-rs (dep:pprof, Unix-only, signal-based).
+# Windows:     CPU sampling via custom SuspendThread/GetThreadContext sampler
+#              (windows-sys, declared in [target.'cfg(windows)'.dependencies]).
+profiling = [
+    "dep:prost",
+    "dep:backtrace",
+    "dep:flate2",
+    "dep:pprof",
+]
+
 [dependencies]
 # Project-local crates
 modkit-macros = { workspace = true }
@@ -95,6 +106,11 @@ gts = { workspace = true }
 gts-macros = { workspace = true }
 zip = { version = "2.3", default-features = false, features = ["deflate"] }
 
+# Profiling support (optional)
+prost = { workspace = true, optional = true }
+backtrace = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+
 # Performance / lock-free structures
 parking_lot = { workspace = true }
 dashmap = { workspace = true }
@@ -120,6 +136,16 @@ tonic = { workspace = true, optional = true }
 # Unix-specific dependencies for graceful process termination
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", default-features = false, features = ["signal"] }
+pprof = { workspace = true, optional = true }
+
+# Windows-specific dependencies for CPU profiling (SuspendThread/GetThreadContext)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", optional = true, features = [
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_Foundation",
+] }
 
 [build-dependencies]
 zip = { version = "2.3", default-features = false, features = ["deflate"] }

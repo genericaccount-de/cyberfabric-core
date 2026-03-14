@@ -58,6 +58,14 @@ pub async fn run_server(config: AppConfig) -> anyhow::Result<()> {
     // This replaces the use of ShutdownOptions::Signals inside the runtime.
     spawn_signal_handler(cancel.clone(), "server");
 
+    // Start the profiling HTTP server if enabled.
+    #[cfg(feature = "profiling")]
+    if let Some(ref prof_cfg) = config.profiling
+        && prof_cfg.enabled
+    {
+        super::host::profiling::start_profiling_server(prof_cfg.clone(), cancel.clone());
+    }
+
     // Build config provider and resolve database options
     let db_options = resolve_db_options(&config)?;
 

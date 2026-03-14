@@ -20,6 +20,7 @@ static-authz = ["dep:static-authz-plugin"]
 static-credstore = ["dep:static-credstore-plugin"]
 mini-chat = ["dep:mini-chat", "dep:static-mini-chat-model-policy-plugin", "dep:static-mini-chat-audit-plugin"]
 otel = ["modkit/otel"]
+profiling = ["modkit/profiling"]
 
 [dependencies]
 mimalloc = { version = "0.1" }

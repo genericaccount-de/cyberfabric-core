@@ -88,6 +88,10 @@ pub struct AppConfig {
     /// Tracing configuration.
     #[serde(default)]
     pub tracing: TracingConfig,
+    /// On-demand CPU/memory profiling endpoint configuration.
+    /// When enabled, a separate HTTP server exposes pprof-compatible endpoints.
+    #[serde(default)]
+    pub profiling: Option<ProfilingConfig>,
     /// Directory containing per-module YAML files (optional).
     #[serde(default)]
     pub modules_dir: Option<String>,
@@ -104,6 +108,7 @@ impl Default for AppConfig {
             database: None,
             logging: default_logging_config(),
             tracing: TracingConfig::default(),
+            profiling: None,
             modules_dir: None,
             modules: HashMap::new(),
         }
@@ -142,6 +147,60 @@ impl ServerConfig {
         std::fs::create_dir_all(&self.home_dir).context("Failed to create home_dir")?;
 
         Ok(())
+    }
+}
+
+fn default_profiling_bind_addr() -> String {
+    "127.0.0.1:6060".to_owned()
+}
+
+fn default_cpu_sample_duration_secs() -> u64 {
+    30
+}
+
+fn default_cpu_sample_frequency_hz() -> u32 {
+    100
+}
+
+/// On-demand profiling endpoint configuration.
+///
+/// When enabled, a **separate** HTTP server (not part of the api-gateway) is
+/// started on `bind_addr` exposing pprof-compatible CPU and memory profiling
+/// endpoints.  Disabled by default.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilingConfig {
+    /// Enable the profiling endpoint.  Default: `false`.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Socket address for the profiling HTTP server.  Default: `127.0.0.1:6060`.
+    #[serde(default = "default_profiling_bind_addr")]
+    pub bind_addr: String,
+
+    /// Maximum CPU profile capture duration in seconds.  Default: `30`.
+    #[serde(default = "default_cpu_sample_duration_secs")]
+    pub cpu_sample_duration_secs: u64,
+
+    /// CPU sampling frequency in Hz (samples per second).  Default: `100` (10 ms).
+    #[serde(default = "default_cpu_sample_frequency_hz")]
+    pub cpu_sample_frequency_hz: u32,
+
+    /// Optional bearer token for endpoint authentication.
+    /// When set, requests must include `Authorization: Bearer <token>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
+}
+
+impl Default for ProfilingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            bind_addr: default_profiling_bind_addr(),
+            cpu_sample_duration_secs: default_cpu_sample_duration_secs(),
+            cpu_sample_frequency_hz: default_cpu_sample_frequency_hz(),
+            auth_token: None,
+        }
     }
 }
 
@@ -2685,6 +2744,86 @@ logging:
         assert!(modules.contains_key("module_a"));
         assert!(modules.contains_key("module_b"));
         assert!(modules.contains_key("module_c"));
+    }
+
+    #[test]
+    fn profiling_config_defaults() {
+        let cfg = ProfilingConfig::default();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.bind_addr, "127.0.0.1:6060");
+        assert_eq!(cfg.cpu_sample_duration_secs, 30);
+        assert_eq!(cfg.cpu_sample_frequency_hz, 100);
+        assert!(cfg.auth_token.is_none());
+    }
+
+    #[test]
+    fn profiling_config_deserialize_minimal() {
+        let yaml = "enabled: true\n";
+        let cfg: ProfilingConfig =
+            serde_json::from_value(serde_json::json!({ "enabled": true })).unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.bind_addr, "127.0.0.1:6060");
+        assert_eq!(cfg.cpu_sample_duration_secs, 30);
+        assert_eq!(cfg.cpu_sample_frequency_hz, 100);
+        assert!(cfg.auth_token.is_none());
+        let _ = yaml;
+    }
+
+    #[test]
+    fn profiling_config_deserialize_full() {
+        let cfg: ProfilingConfig = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "bind_addr": "0.0.0.0:9090",
+            "cpu_sample_duration_secs": 60,
+            "cpu_sample_frequency_hz": 250,
+            "auth_token": "my-secret"
+        }))
+        .unwrap();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.bind_addr, "0.0.0.0:9090");
+        assert_eq!(cfg.cpu_sample_duration_secs, 60);
+        assert_eq!(cfg.cpu_sample_frequency_hz, 250);
+        assert_eq!(cfg.auth_token.as_deref(), Some("my-secret"));
+    }
+
+    #[test]
+    fn profiling_config_rejects_unknown_fields() {
+        let result: Result<ProfilingConfig, _> = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "unknown_field": 42
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn profiling_config_roundtrip_serialize() {
+        let cfg = ProfilingConfig {
+            enabled: true,
+            bind_addr: "127.0.0.1:7070".to_owned(),
+            cpu_sample_duration_secs: 15,
+            cpu_sample_frequency_hz: 50,
+            auth_token: Some("token".to_owned()),
+        };
+        let json = serde_json::to_value(&cfg).unwrap();
+        let deserialized: ProfilingConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(deserialized.enabled, cfg.enabled);
+        assert_eq!(deserialized.bind_addr, cfg.bind_addr);
+        assert_eq!(
+            deserialized.cpu_sample_duration_secs,
+            cfg.cpu_sample_duration_secs
+        );
+        assert_eq!(
+            deserialized.cpu_sample_frequency_hz,
+            cfg.cpu_sample_frequency_hz
+        );
+        assert_eq!(deserialized.auth_token, cfg.auth_token);
+    }
+
+    #[test]
+    fn profiling_config_auth_token_omitted_from_serialization_when_none() {
+        let cfg = ProfilingConfig::default();
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert!(!json.as_object().unwrap().contains_key("auth_token"));
     }
 }
 

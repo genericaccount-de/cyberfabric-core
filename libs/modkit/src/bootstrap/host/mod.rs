@@ -16,3 +16,6 @@ pub use metrics_provider::*;
 pub use panic::*;
 pub use paths::{HomeDirError, expand_tilde, normalize_path};
 pub use signals::*;
+
+#[cfg(feature = "profiling")]
+pub mod profiling;

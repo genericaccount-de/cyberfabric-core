@@ -9,6 +9,14 @@
 server:
   home_dir: "~/.hyperspot"
 
+# # On-demand profiling endpoint (requires --features profiling)
+# profiling:
+#   enabled: true
+#   bind_addr: "127.0.0.1:6060"
+#   cpu_sample_duration_secs: 30
+#   cpu_sample_frequency_hz: 100
+#   # auth_token: "my-secret-token"
+
 database:
   servers:
     sqlite_mini_chat:
