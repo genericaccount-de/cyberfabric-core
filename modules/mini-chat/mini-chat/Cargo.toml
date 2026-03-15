@@ -19,7 +19,7 @@ workspace = true
 
 [features]
 default = []
-k8s-leader = ["dep:kube", "dep:k8s-openapi"]
+k8s = ["dep:kube", "dep:k8s-openapi"]
 
 [dependencies]
 # Plugin SDK - policy plugin traits, models, and errors
@@ -91,12 +91,13 @@ modkit-odata = { workspace = true, features = ["with-utoipa"] }
 modkit-utils = { workspace = true }
 heck = { workspace = true }
 secrecy = { workspace = true }
-# k8s leader election (optional, behind k8s-leader feature)
-kube = { workspace = true, features = ["client"], optional = true }
+# k8s leader election (optional, behind k8s feature)
+kube = { workspace = true, features = ["client", "rustls-tls", "aws-lc-rs"], optional = true }
 k8s-openapi = { workspace = true, features = ["latest"], optional = true }
 
 [dev-dependencies]
 chrono = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+temp-env = { workspace = true }
 
 

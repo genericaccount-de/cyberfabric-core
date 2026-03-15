@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use parking_lot::Mutex;
-use tracing_subscriber::{Layer, fmt, util::SubscriberInitExt};
+use tracing_subscriber::{Layer, fmt};
 
 // ========== OTEL-agnostic layer type (compiles with/without the feature) ==========
 #[cfg(feature = "otel")]
@@ -467,7 +467,7 @@ fn install_subscriber(
             .with(file_layer_opt)
     };
 
-    if let Err(e) = subscriber.try_init() {
+    if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
         eprintln!("tracing subscriber init failed: {e}");
     }
 }
@@ -499,7 +499,9 @@ fn init_minimal(
         base.with(env).with(fmt_layer)
     };
 
-    if let Err(e) = subscriber.try_init() {
+    // LogTracer is already initialized by the caller (init_logging_unified),
+    // so use set_global_default instead of try_init to avoid double log::set_logger.
+    if let Err(e) = tracing::subscriber::set_global_default(subscriber) {
         eprintln!("tracing subscriber init failed (minimal): {e}");
     }
 }

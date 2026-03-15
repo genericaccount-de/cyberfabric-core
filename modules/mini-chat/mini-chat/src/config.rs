@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 use crate::infra::llm::ProviderKind;
 use crate::module::DEFAULT_URL_PREFIX;
 
+pub mod background;
+pub use background::{CleanupWorkerConfig, OrphanWatchdogConfig, ThreadSummaryWorkerConfig};
+
 #[derive(Debug, Clone, Serialize, Deserialize, modkit_macros::ExpandVars)]
 #[serde(deny_unknown_fields)]
 pub struct MiniChatConfig {
@@ -37,6 +40,15 @@ pub struct MiniChatConfig {
     #[expand_vars]
     #[serde(default = "default_providers")]
     pub providers: HashMap<String, ProviderEntry>,
+    /// Orphan watchdog background worker.
+    #[serde(default)]
+    pub orphan_watchdog: OrphanWatchdogConfig,
+    /// Thread summary background worker.
+    #[serde(default)]
+    pub thread_summary_worker: ThreadSummaryWorkerConfig,
+    /// Cleanup background worker for soft-deleted chat resources.
+    #[serde(default)]
+    pub cleanup_worker: CleanupWorkerConfig,
 }
 
 /// Which file/vector-store implementation to use for RAG operations.
@@ -385,6 +397,9 @@ impl Default for MiniChatConfig {
             client_credentials: ClientCredentialsConfig::default(),
             metrics: MetricsConfig::default(),
             providers: default_providers(),
+            orphan_watchdog: OrphanWatchdogConfig::default(),
+            thread_summary_worker: ThreadSummaryWorkerConfig::default(),
+            cleanup_worker: CleanupWorkerConfig::default(),
         }
     }
 }
@@ -572,6 +587,9 @@ pub struct OutboxConfig {
     /// Queue name for attachment cleanup events.
     #[serde(default = "default_outbox_cleanup_queue_name")]
     pub cleanup_queue_name: String,
+    /// Queue name for thread summary task events.
+    #[serde(default = "default_thread_summary_queue_name")]
+    pub thread_summary_queue_name: String,
     /// Queue name for audit events.
     #[serde(default = "default_audit_queue_name")]
     pub audit_queue_name: String,
@@ -586,6 +604,7 @@ impl Default for OutboxConfig {
         Self {
             queue_name: default_outbox_queue_name(),
             cleanup_queue_name: default_outbox_cleanup_queue_name(),
+            thread_summary_queue_name: default_thread_summary_queue_name(),
             audit_queue_name: default_audit_queue_name(),
             num_partitions: default_outbox_num_partitions(),
         }
@@ -599,6 +618,9 @@ impl OutboxConfig {
         }
         if self.cleanup_queue_name.trim().is_empty() {
             return Err("outbox cleanup_queue_name must not be empty".to_owned());
+        }
+        if self.thread_summary_queue_name.trim().is_empty() {
+            return Err("outbox thread_summary_queue_name must not be empty".to_owned());
         }
         if self.audit_queue_name.trim().is_empty() {
             return Err("outbox audit_queue_name must not be empty".to_owned());
@@ -619,6 +641,10 @@ fn default_outbox_queue_name() -> String {
 
 fn default_outbox_cleanup_queue_name() -> String {
     "mini-chat.attachment_cleanup".to_owned()
+}
+
+fn default_thread_summary_queue_name() -> String {
+    "mini-chat.thread_summary".to_owned()
 }
 
 fn default_audit_queue_name() -> String {

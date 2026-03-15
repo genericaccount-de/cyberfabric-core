@@ -19,6 +19,7 @@ static-authn = ["dep:static-authn-plugin"]
 static-authz = ["dep:static-authz-plugin"]
 static-credstore = ["dep:static-credstore-plugin"]
 mini-chat = ["dep:mini-chat"]
+k8s = ["mini-chat/k8s"]
 otel = ["modkit/otel"]
 
 [dependencies]

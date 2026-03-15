@@ -11,6 +11,7 @@ pub use infra::plugins::StaticMiniChatModelPolicyPlugin;
 // === INTERNAL MODULES ===
 #[doc(hidden)]
 pub mod api;
+pub(crate) mod background_workers;
 #[doc(hidden)]
 pub mod config;
 #[doc(hidden)]

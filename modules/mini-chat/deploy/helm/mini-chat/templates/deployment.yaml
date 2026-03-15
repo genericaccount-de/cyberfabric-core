@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "mini-chat.fullname" . }}
+  labels:
+    {{- include "mini-chat.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "mini-chat.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "mini-chat.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+    spec:
+      {{- if .Values.leaderElection.enabled }}
+      serviceAccountName: {{ include "mini-chat.serviceAccountName" . }}
+      {{- end }}
+      containers:
+        - name: {{ .Chart.Name }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          env:
+            # Downward API — required by k8s feature
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # Bind to all interfaces inside the container
+            - name: APP__MODULES__api_gateway__CONFIG__BIND_ADDR
+              value: "0.0.0.0:{{ .Values.service.port }}"
+            # Azure OpenAI credentials (resolved by config ${} placeholders)
+            - name: AZURE_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mini-chat.fullname" . }}
+                  key: azure-openai-api-key
+            - name: AZURE_OPENAI_API_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mini-chat.fullname" . }}
+                  key: azure-openai-api-host
+            # PostgreSQL password (resolved by config ${DB_PASSWORD} placeholder)
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "mini-chat.fullname" . }}
+                  key: pg-password
+          volumeMounts:
+            - name: config
+              mountPath: /app/config/mini-chat.yaml
+              subPath: mini-chat.yaml
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            failureThreshold: 2
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "mini-chat.fullname" . }}

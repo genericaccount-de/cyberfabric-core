@@ -1,0 +1,35 @@
+replicaCount: 3
+
+image:
+  repository: hyperspot-mini-chat
+  tag: latest
+  pullPolicy: Never
+
+service:
+  type: ClusterIP
+  port: 8087
+
+secrets:
+  azureOpenaiApiKey: "REPLACE_ME"
+  azureOpenaiApiHost: "REPLACE_ME"
+
+leaderElection:
+  enabled: true
+  prefix: mini-chat
+  roles:
+    - orphan-watchdog
+
+postgres:
+  host: "postgres.default.svc.cluster.local"
+  port: 5432
+  database: "mini_chat"
+  user: "mini_chat"
+  password: "REPLACE_ME"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi

@@ -24,6 +24,8 @@ pub struct InfraOutboxEnqueuer {
     outbox: Arc<Outbox>,
     usage_queue_name: String,
     cleanup_queue_name: String,
+    #[allow(dead_code)]
+    thread_summary_queue_name: String,
     audit_queue_name: String,
     num_partitions: u32,
 }
@@ -33,6 +35,7 @@ impl InfraOutboxEnqueuer {
         outbox: Arc<Outbox>,
         usage_queue_name: String,
         cleanup_queue_name: String,
+        thread_summary_queue_name: String,
         audit_queue_name: String,
         num_partitions: u32,
     ) -> Self {
@@ -40,6 +43,7 @@ impl InfraOutboxEnqueuer {
             outbox,
             usage_queue_name,
             cleanup_queue_name,
+            thread_summary_queue_name,
             audit_queue_name,
             num_partitions,
         }
@@ -55,6 +59,40 @@ impl InfraOutboxEnqueuer {
         {
             (hash % u128::from(num_partitions)) as u32
         }
+    }
+
+    /// Enqueue a thread summary task event within the caller's transaction.
+    ///
+    /// Partitions by `chat_id` so all summary events for a given chat land in
+    /// the same partition (processed in order by a single consumer).
+    #[allow(dead_code)]
+    pub async fn enqueue_thread_summary_task(
+        &self,
+        runner: &(dyn modkit_db::secure::DBRunner + Sync),
+        chat_id: uuid::Uuid,
+        payload: Vec<u8>,
+    ) -> Result<(), DomainError> {
+        let partition = Self::compute_partition(chat_id, self.num_partitions);
+
+        self.outbox
+            .enqueue(
+                runner,
+                &self.thread_summary_queue_name,
+                partition,
+                payload,
+                "application/json",
+            )
+            .await
+            .map_err(|e| DomainError::internal(format!("outbox enqueue: {e}")))?;
+
+        info!(
+            queue = %self.thread_summary_queue_name,
+            partition,
+            chat_id = %chat_id,
+            "thread summary task enqueued"
+        );
+
+        Ok(())
     }
 }
 
@@ -159,31 +197,6 @@ impl OutboxEnqueuer for InfraOutboxEnqueuer {
 
     fn flush(&self) {
         self.outbox.flush();
-    }
-}
-
-/// Stub handler for attachment cleanup events.
-///
-/// Returns `Retry` for every message — events accumulate safely in the outbox
-/// until the cleanup worker ships. This ensures the queue is registered and
-/// partitioned from day one.
-pub struct AttachmentCleanupHandler;
-
-#[async_trait]
-impl modkit_db::outbox::MessageHandler for AttachmentCleanupHandler {
-    async fn handle(
-        &self,
-        msg: &modkit_db::outbox::OutboxMessage,
-        _cancel: tokio_util::sync::CancellationToken,
-    ) -> modkit_db::outbox::HandlerResult {
-        warn!(
-            partition_id = msg.partition_id,
-            seq = msg.seq,
-            "attachment cleanup handler not yet implemented - retrying"
-        );
-        modkit_db::outbox::HandlerResult::Retry {
-            reason: "cleanup handler not yet implemented".to_owned(),
-        }
     }
 }
 
@@ -1052,6 +1065,7 @@ mod tests {
             outbox,
             "test.usage".to_owned(),
             "test.cleanup".to_owned(),
+            "test.thread_summary".to_owned(),
             "test.audit".to_owned(),
             1u32,
         );
@@ -1123,6 +1137,7 @@ mod tests {
             outbox,
             "test.usage".to_owned(),
             "test.cleanup".to_owned(),
+            "test.thread_summary".to_owned(),
             "test.audit".to_owned(),
             1u32,
         );

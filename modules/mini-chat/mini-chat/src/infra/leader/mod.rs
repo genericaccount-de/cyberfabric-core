@@ -3,16 +3,17 @@
 //! Two implementations behind a feature gate:
 //! - [`NoopLeaderElector`] — single-process mode, no coordination overhead.
 //! - [`K8sLeaseElector`](k8s_lease::K8sLeaseElector) — k8s `coordination.k8s.io/v1` Lease
-//!   (requires `k8s-leader` feature).
+//!   (requires `k8s` feature).
 
 use std::future::Future;
 use std::pin::Pin;
+#[cfg(any(not(feature = "k8s"), test))]
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "k8s-leader")]
+#[cfg(feature = "k8s")]
 pub mod k8s_lease;
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -49,7 +50,7 @@ where
 /// The elector manages acquisition / renewal / release; the worker implements
 /// its logic inside the provided [`LeaderWorkFn`].
 #[async_trait]
-pub trait LeaderElector: Send + Sync {
+pub trait LeaderElector: Send + Sync + std::fmt::Debug {
     /// Run `work` only while this instance holds leadership for `role`.
     ///
     /// Returns when `cancel` fires (module shutdown) or on unrecoverable error.
@@ -73,8 +74,11 @@ pub trait LeaderElector: Send + Sync {
 /// No-op leader elector for single-process deployments.
 ///
 /// Immediately delegates to the work function with the parent cancel token.
+#[derive(Debug)]
+#[cfg(any(not(feature = "k8s"), test))]
 pub struct NoopLeaderElector;
 
+#[cfg(any(not(feature = "k8s"), test))]
 #[async_trait]
 impl LeaderElector for NoopLeaderElector {
     async fn run_role(
@@ -88,6 +92,7 @@ impl LeaderElector for NoopLeaderElector {
 }
 
 /// Creates a [`NoopLeaderElector`] wrapped in an `Arc`.
+#[cfg(any(not(feature = "k8s"), test))]
 #[must_use]
 pub fn noop() -> Arc<dyn LeaderElector> {
     Arc::new(NoopLeaderElector)
@@ -152,10 +157,5 @@ mod tests {
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), handle).await;
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn noop_factory_returns_arc() {
-        let _elector: Arc<dyn LeaderElector> = noop();
     }
 }

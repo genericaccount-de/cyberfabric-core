@@ -17,13 +17,13 @@ use tracing::info;
 use types_registry_sdk::{RegisterResult, TypesRegistryClient};
 
 use crate::api::rest::routes;
+use crate::background_workers::{self, WORKER_STOP_TIMEOUT, WorkerConfigs};
 use crate::config::ProviderEntry;
 use crate::domain::ports::MiniChatMetricsPort;
 use crate::domain::service::{AppServices as GenericAppServices, Repositories};
 use crate::infra::metrics::MiniChatMetricsMeter;
-use crate::infra::outbox::{
-    AttachmentCleanupHandler, AuditEventHandler, InfraOutboxEnqueuer, UsageEventHandler,
-};
+use crate::infra::outbox::{AuditEventHandler, InfraOutboxEnqueuer, UsageEventHandler};
+use crate::infra::workers::WorkerHandles;
 
 pub(crate) type AppServices = GenericAppServices<
     TurnRepository,
@@ -64,6 +64,11 @@ pub struct MiniChatModule {
     outbox_handle: Mutex<Option<OutboxHandle>>,
     /// OAGW gateway + provider config for deferred upstream registration in `start()`.
     oagw_deferred: OnceLock<OagwDeferred>,
+    /// Worker configs captured in `init()`, consumed by `start()`.
+    worker_configs: OnceLock<WorkerConfigs>,
+    worker_cancel: Mutex<Option<CancellationToken>>,
+    /// Handles to spawned background workers — joined during `stop()`.
+    worker_handles: Mutex<Option<WorkerHandles>>,
 }
 
 /// State needed to register OAGW upstreams in `start()` (after GTS is ready).
@@ -81,6 +86,9 @@ impl Default for MiniChatModule {
             url_prefix: OnceLock::new(),
             outbox_handle: Mutex::new(None),
             oagw_deferred: OnceLock::new(),
+            worker_configs: OnceLock::new(),
+            worker_cancel: Mutex::new(None),
+            worker_handles: Mutex::new(None),
         }
     }
 }
@@ -115,6 +123,15 @@ impl Module for MiniChatModule {
                 .validate(id)
                 .map_err(|e| anyhow::anyhow!("providers config: {e}"))?;
         }
+        cfg.orphan_watchdog
+            .validate()
+            .map_err(|e| anyhow::anyhow!("orphan_watchdog config: {e}"))?;
+        cfg.thread_summary_worker
+            .validate()
+            .map_err(|e| anyhow::anyhow!("thread_summary_worker config: {e}"))?;
+        cfg.cleanup_worker
+            .validate()
+            .map_err(|e| anyhow::anyhow!("cleanup_worker config: {e}"))?;
 
         let vendor = cfg.vendor.trim().to_owned();
         if vendor.is_empty() {
@@ -168,6 +185,7 @@ impl Module for MiniChatModule {
         let num_partitions = cfg.outbox.num_partitions;
         let queue_name = cfg.outbox.queue_name.clone();
         let cleanup_queue_name = cfg.outbox.cleanup_queue_name.clone();
+        let thread_summary_queue_name = cfg.outbox.thread_summary_queue_name.clone();
         let audit_queue_name = cfg.outbox.audit_queue_name.clone();
 
         let partitions = Partitions::of(
@@ -190,7 +208,9 @@ impl Module for MiniChatModule {
                 plugin_provider: model_policy_gw.clone(),
             })
             .queue(&cleanup_queue_name, partitions)
-            .decoupled(AttachmentCleanupHandler)
+            .decoupled(crate::infra::workers::cleanup_worker::AttachmentCleanupHandler)
+            .queue(&thread_summary_queue_name, partitions)
+            .decoupled(crate::infra::workers::thread_summary_worker::ThreadSummaryHandler)
             .queue(&audit_queue_name, partitions)
             // Lease must exceed the plugin's worst-case HTTP budget:
             // request_timeout_secs * (retry_max_retries + 1) + backoff margin.
@@ -213,6 +233,7 @@ impl Module for MiniChatModule {
             outbox,
             queue_name,
             cleanup_queue_name,
+            thread_summary_queue_name,
             audit_queue_name,
             num_partitions,
         ));
@@ -389,6 +410,12 @@ impl Module for MiniChatModule {
             .set(services)
             .map_err(|_| anyhow::anyhow!("{} module already initialized", Self::MODULE_NAME))?;
 
+        self.worker_configs
+            .set(WorkerConfigs {
+                orphan_watchdog: cfg.orphan_watchdog,
+            })
+            .map_err(|_| anyhow::anyhow!("{} worker_configs already set", Self::MODULE_NAME))?;
+
         info!("{} module initialized successfully", Self::MODULE_NAME);
         Ok(())
     }
@@ -430,7 +457,15 @@ impl RestApiCapability for MiniChatModule {
 
 #[async_trait]
 impl RunnableCapability for MiniChatModule {
-    async fn start(&self, _cancel: CancellationToken) -> anyhow::Result<()> {
+    async fn start(&self, cancel: CancellationToken) -> anyhow::Result<()> {
+        let wc = self.worker_configs.get().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} worker_configs not set - init() must run before start()",
+                Self::MODULE_NAME
+            )
+        })?;
+        let leader_elector = background_workers::prepare_worker_runtime(wc).await?;
+
         // Register OAGW upstreams now that GTS is in ready mode (post_init
         // has completed). During init() this fails because types-registry
         // list() only queries the persistent store which is empty until
@@ -446,10 +481,35 @@ impl RunnableCapability for MiniChatModule {
             )
             .await?;
         }
+
+        let (handles, worker_cancel) =
+            background_workers::spawn_workers(wc, &cancel, leader_elector.as_ref())?;
+        self.store_worker_runtime(handles, worker_cancel).await?;
+
         Ok(())
     }
 
     async fn stop(&self, cancel: CancellationToken) -> anyhow::Result<()> {
+        if let Some(worker_cancel) = self
+            .worker_cancel
+            .lock()
+            .map_err(|e| anyhow::anyhow!("worker_cancel lock: {e}"))?
+            .take()
+        {
+            worker_cancel.cancel();
+        }
+
+        let workers = self
+            .worker_handles
+            .lock()
+            .map_err(|e| anyhow::anyhow!("worker_handles lock: {e}"))?
+            .take();
+        if let Some(handles) = workers {
+            info!("Waiting for background workers to stop");
+            handles.join_all(cancel.clone(), WORKER_STOP_TIMEOUT).await;
+            info!("Background workers stopped");
+        }
+
         let handle = self
             .outbox_handle
             .lock()
@@ -465,6 +525,73 @@ impl RunnableCapability for MiniChatModule {
                     info!("Outbox pipeline stop cancelled by framework deadline");
                 }
             }
+        }
+        Ok(())
+    }
+}
+
+impl MiniChatModule {
+    async fn store_worker_runtime(
+        &self,
+        handles: WorkerHandles,
+        worker_cancel: CancellationToken,
+    ) -> anyhow::Result<()> {
+        let worker_cancel_cleanup = worker_cancel.clone();
+
+        // Store cancel token. Guard must not live across an await point.
+        let cancel_already_set = {
+            let mut guard = self
+                .worker_cancel
+                .lock()
+                .map_err(|e| anyhow::anyhow!("worker_cancel lock: {e}"))?;
+            if guard.is_some() {
+                true
+            } else {
+                *guard = Some(worker_cancel);
+                false
+            }
+            // guard dropped here — before any await
+        };
+        if cancel_already_set {
+            worker_cancel_cleanup.cancel();
+            let hard_stop = CancellationToken::new();
+            hard_stop.cancel();
+            handles.join_all(hard_stop, WORKER_STOP_TIMEOUT).await;
+            anyhow::bail!("{} worker_cancel already set", Self::MODULE_NAME);
+        }
+
+        // Store handles. Guard must not live across an await point.
+        let mut handles = Some(handles);
+        let handles_err = {
+            match self.worker_handles.lock() {
+                Ok(mut guard) => {
+                    if guard.is_some() {
+                        Some("worker_handles already set".to_owned())
+                    } else {
+                        *guard = handles.take();
+                        None
+                    }
+                }
+                Err(e) => Some(format!("worker_handles lock: {e}")),
+            }
+            // guard dropped here — before any await
+        };
+        if let Some(msg) = handles_err {
+            if let Ok(mut cancel_guard) = self.worker_cancel.lock() {
+                cancel_guard.take();
+            }
+            worker_cancel_cleanup.cancel();
+            if let Some(handles) = handles {
+                let hard_stop = CancellationToken::new();
+                hard_stop.cancel();
+                handles.join_all(hard_stop, WORKER_STOP_TIMEOUT).await;
+            }
+            // handles was either moved into the mutex (not the error case)
+            // or never stored. In the "already set" case it was moved, so
+            // we rely on the cancel token to stop workers; their JoinHandles
+            // will be cleaned up when the existing WorkerHandles is joined
+            // in stop().
+            anyhow::bail!("{} {msg}", Self::MODULE_NAME);
         }
         Ok(())
     }

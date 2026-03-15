@@ -386,7 +386,7 @@ file-rotate = "0.8"
 # Time handling
 chrono = { version = "0.4", default-features = false, features = ["serde"] }
 
-# Kubernetes client (optional, for k8s-leader feature gate)
+# Kubernetes client (optional, for k8s feature gate)
 kube = { version = "3.0", default-features = false }
 k8s-openapi = { version = "0.27", default-features = false }
 
@@ -507,7 +507,7 @@ pptx-to-md = "0.4"
 
 # Additional testing utilities
 tokio-test = "0.4"
-temp-env = "0.3"
+temp-env = { version = "0.3", features = ["async_closure"] }
 
 # Additional utilities
 nanoid = "0.4"

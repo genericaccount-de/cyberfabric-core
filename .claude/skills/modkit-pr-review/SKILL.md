@@ -17,6 +17,17 @@ Posts findings as inline review comments directly on the PR.
 ## Inputs
 
 - `<PR_NUMBER>` — required, the GitHub PR number (e.g. `123`)
+- `--repo <owner/repo>` — optional, the GitHub repository (e.g. `cyberfabric/cyberfabric-core`)
+
+## Resolving the target repository
+
+Before fetching PR data, determine which repository to use:
+
+1. If `--repo` was provided in the arguments, use it.
+2. Otherwise, check if an `upstream` remote exists: `git remote get-url upstream 2>/dev/null`. If it returns a URL, extract `owner/repo` from it.
+3. Otherwise, fall back to the current repo via `gh repo view --json nameWithOwner -q .nameWithOwner`.
+
+Store the result as `REPO` and pass `--repo $REPO` to all `gh pr` commands, and use it in API paths as `repos/$REPO/pulls/...`.
 
 ## Review guidelines
 
@@ -54,8 +65,8 @@ When reviewing, also consult:
 ### Step 1: Fetch PR metadata and diff
 
 ```bash
-gh pr view <PR_NUMBER> --json number,title,body,headRefOid,baseRefName,headRefName
-gh pr diff <PR_NUMBER>
+gh pr view <PR_NUMBER> --repo $REPO --json number,title,body,headRefOid,baseRefName,headRefName
+gh pr diff <PR_NUMBER> --repo $REPO
 ```
 
 Save the diff output for analysis. Extract the HEAD commit SHA — you need it for posting comments.
@@ -121,7 +132,7 @@ cat > /tmp/review-payload.json << 'REVIEW_EOF'
 }
 REVIEW_EOF
 
-gh api repos/{owner}/{repo}/pulls/<PR_NUMBER>/reviews \
+gh api repos/$REPO/pulls/<PR_NUMBER>/reviews \
   --method POST \
   --input /tmp/review-payload.json
 ```

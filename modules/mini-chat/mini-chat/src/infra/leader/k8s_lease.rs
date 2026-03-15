@@ -5,12 +5,12 @@
 
 use std::time::Duration;
 
-use anyhow::{anyhow, Context};
+use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use k8s_openapi::api::coordination::v1::Lease;
 use k8s_openapi::jiff::{SignedDuration, Timestamp};
-use kube::api::{Api, ObjectMeta, PostParams};
 use kube::Client;
+use kube::api::{Api, ObjectMeta, PostParams};
 use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
@@ -19,10 +19,9 @@ use tracing::{info, warn};
 use super::{LeaderElector, LeaderWorkFn};
 
 const WORK_STOP_TIMEOUT: Duration = Duration::from_secs(5);
-
-// ────────────────────────────────────────────────────────────────────────────
-// Config
-// ────────────────────────────────────────────────────────────────────────────
+const K8S_API_TIMEOUT: Duration = Duration::from_secs(10);
+const POD_NAMESPACE_ENV: &str = "POD_NAMESPACE";
+const POD_NAME_ENV: &str = "POD_NAME";
 
 /// Configuration for k8s Lease-based leader election.
 #[derive(Debug, Clone)]
@@ -40,23 +39,23 @@ pub struct K8sLeaseConfig {
 }
 
 impl K8sLeaseConfig {
-    /// Build config from environment variables with sensible defaults.
+    /// Build config from environment variables.
     ///
-    /// - `POD_NAMESPACE` -> namespace (default: `"default"`)
-    /// - `POD_NAME` -> identity (default: `"local"`)
-    #[must_use]
-    pub fn from_env(lease_prefix: impl Into<String>) -> Self {
-        Self {
-            namespace: std::env::var("POD_NAMESPACE").unwrap_or_else(|_| "default".into()),
-            identity: std::env::var("POD_NAME").unwrap_or_else(|_| "local".into()),
+    /// - `POD_NAMESPACE` -> namespace (**required**)
+    /// - `POD_NAME` -> identity (**required**)
+    pub fn from_env(lease_prefix: impl Into<String>) -> anyhow::Result<Self> {
+        Ok(Self {
+            namespace: required_env(POD_NAMESPACE_ENV)?,
+            identity: required_env(POD_NAME_ENV)?,
             lease_prefix: lease_prefix.into(),
             lease_duration: Duration::from_secs(15),
             renew_period: Duration::from_secs(2),
-        }
+        })
     }
 
     /// Override timing parameters.
     #[must_use]
+    #[allow(dead_code)]
     pub fn with_timing(mut self, lease_duration: Duration, renew_period: Duration) -> Self {
         self.lease_duration = lease_duration;
         self.renew_period = renew_period;
@@ -103,15 +102,32 @@ impl K8sLeaseConfig {
     }
 }
 
+fn required_env(name: &str) -> anyhow::Result<String> {
+    let value = std::env::var(name).map_err(|_| anyhow!("k8s leader: {name} must be set"))?;
+    if value.trim().is_empty() {
+        return Err(anyhow!("k8s leader: {name} must be non-empty"));
+    }
+    Ok(value)
+}
+
 /// Leader elector backed by a k8s `coordination.k8s.io/v1` Lease.
 pub struct K8sLeaseElector {
     client: Client,
     config: K8sLeaseConfig,
 }
 
+impl std::fmt::Debug for K8sLeaseElector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("K8sLeaseElector")
+            .field("config", &self.config)
+            .finish_non_exhaustive()
+    }
+}
+
 impl K8sLeaseElector {
     /// Create an elector with an existing kube [`Client`].
     #[must_use]
+    #[allow(dead_code)]
     pub fn with_client(client: Client, config: K8sLeaseConfig) -> Self {
         Self { client, config }
     }
@@ -137,9 +153,7 @@ impl LeaderElector for K8sLeaseElector {
         cancel: CancellationToken,
         work: LeaderWorkFn,
     ) -> anyhow::Result<()> {
-        self.config
-            .validate()
-            .context("invalid k8s lease config")?;
+        self.config.validate().context("invalid k8s lease config")?;
         let lease_name = format!("{}-{role}", self.config.lease_prefix);
         let api: Api<Lease> = Api::namespaced(self.client.clone(), &self.config.namespace);
         let mut backoff = Backoff::new();
@@ -155,7 +169,10 @@ impl LeaderElector for K8sLeaseElector {
                 Ok(true) => {
                     backoff.reset();
                     info!(role, identity = %self.config.identity, %lease_name, "acquired leadership");
-                    if let Err(e) = self.run_while_leader(role, &api, &lease_name, cancel.clone(), &work).await {
+                    if let Err(e) = self
+                        .run_while_leader(role, &api, &lease_name, cancel.clone(), &work)
+                        .await
+                    {
                         warn!(role, error = %e, "leader loop ended (leadership lost or error)");
                     }
                 }
@@ -183,17 +200,23 @@ impl LeaderElector for K8sLeaseElector {
 }
 
 impl K8sLeaseElector {
-    async fn try_acquire(
-        &self,
-        api: &Api<Lease>,
-        lease_name: &str,
-    ) -> anyhow::Result<bool> {
+    async fn try_acquire(&self, api: &Api<Lease>, lease_name: &str) -> anyhow::Result<bool> {
         ensure_lease_exists(api, &self.config.namespace, lease_name).await?;
 
-        let lease = api
-            .get(lease_name)
+        let lease = timeout(K8S_API_TIMEOUT, api.get(lease_name))
             .await
-            .with_context(|| format!("get Lease {} for acquire", lease_ref(&self.config.namespace, lease_name)))?;
+            .with_context(|| {
+                format!(
+                    "timeout getting Lease {} for acquire",
+                    lease_ref(&self.config.namespace, lease_name)
+                )
+            })?
+            .with_context(|| {
+                format!(
+                    "get Lease {} for acquire",
+                    lease_ref(&self.config.namespace, lease_name)
+                )
+            })?;
 
         let now = Timestamp::now();
         let (holder, renew_time, duration_s) = read_lease_state(&lease);
@@ -212,23 +235,34 @@ impl K8sLeaseElector {
         // Acquire leadership using resourceVersion-guarded replace to avoid split-brain.
         let mut new_lease = lease.clone();
         new_lease.spec.get_or_insert_default().holder_identity = Some(self.config.identity.clone());
-        new_lease.spec.get_or_insert_default().lease_duration_seconds = Some(lease_duration_s);
-        new_lease.spec.get_or_insert_default().renew_time =
-            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime(now));
+        new_lease
+            .spec
+            .get_or_insert_default()
+            .lease_duration_seconds = Some(lease_duration_s);
+        new_lease.spec.get_or_insert_default().renew_time = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime(now),
+        );
 
-        match api
-            .replace(lease_name, &PostParams::default(), &new_lease)
-            .await
+        match timeout(
+            K8S_API_TIMEOUT,
+            api.replace(lease_name, &PostParams::default(), &new_lease),
+        )
+        .await
         {
-            Ok(_) => Ok(true),
-            Err(kube::Error::Api(resp)) if resp.code == 409 => Ok(false),
-            Err(e) => Err(e).with_context(|| {
+            Ok(Ok(_)) => Ok(true),
+            Ok(Err(kube::Error::Api(resp))) if resp.code == 409 => Ok(false),
+            Ok(Err(e)) => Err(e).with_context(|| {
                 format!(
                     "replace Lease {} to acquire leadership for {}",
                     lease_ref(&self.config.namespace, lease_name),
                     self.config.identity
                 )
             }),
+            Err(_) => Err(anyhow!(
+                "timeout replacing Lease {} to acquire leadership for {}",
+                lease_ref(&self.config.namespace, lease_name),
+                self.config.identity
+            )),
         }
     }
 
@@ -272,10 +306,20 @@ impl K8sLeaseElector {
     }
 
     async fn renew_once(&self, api: &Api<Lease>, lease_name: &str) -> anyhow::Result<()> {
-        let lease = api
-            .get(lease_name)
+        let lease = timeout(K8S_API_TIMEOUT, api.get(lease_name))
             .await
-            .with_context(|| format!("get Lease {} for renew", lease_ref(&self.config.namespace, lease_name)))?;
+            .with_context(|| {
+                format!(
+                    "timeout getting Lease {} for renew",
+                    lease_ref(&self.config.namespace, lease_name)
+                )
+            })?
+            .with_context(|| {
+                format!(
+                    "get Lease {} for renew",
+                    lease_ref(&self.config.namespace, lease_name)
+                )
+            })?;
         let (holder, renew_time, duration_s) = read_lease_state(&lease);
 
         if holder.as_deref() != Some(self.config.identity.as_str()) {
@@ -290,22 +334,30 @@ impl K8sLeaseElector {
         }
 
         let mut new_lease = lease.clone();
-        new_lease.spec.get_or_insert_default().renew_time =
-            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime(now));
+        new_lease.spec.get_or_insert_default().renew_time = Some(
+            k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime(now),
+        );
 
-        match api
-            .replace(lease_name, &PostParams::default(), &new_lease)
-            .await
+        match timeout(
+            K8S_API_TIMEOUT,
+            api.replace(lease_name, &PostParams::default(), &new_lease),
+        )
+        .await
         {
-            Ok(_) => Ok(()),
-            Err(kube::Error::Api(resp)) if resp.code == 409 => Err(anyhow!("renew conflict")),
-            Err(e) => Err(e).with_context(|| {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(kube::Error::Api(resp))) if resp.code == 409 => Err(anyhow!("renew conflict")),
+            Ok(Err(e)) => Err(e).with_context(|| {
                 format!(
                     "replace Lease {} to renew leadership for {}",
                     lease_ref(&self.config.namespace, lease_name),
                     self.config.identity
                 )
             }),
+            Err(_) => Err(anyhow!(
+                "timeout replacing Lease {} to renew leadership for {}",
+                lease_ref(&self.config.namespace, lease_name),
+                self.config.identity
+            )),
         }
     }
 
@@ -319,10 +371,6 @@ impl K8sLeaseElector {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-// Internal helpers
-// ────────────────────────────────────────────────────────────────────────────
-
 struct ActiveRole {
     child: CancellationToken,
     handle: JoinHandle<anyhow::Result<()>>,
@@ -333,28 +381,45 @@ impl ActiveRole {
         self.stop_with_timeout(role, WORK_STOP_TIMEOUT).await;
     }
 
-    async fn stop_with_timeout(self, role: &str, stop_timeout: Duration) {
+    /// Stops the worker, returning `true` if shutdown was clean (no error, no
+    /// panic, no timeout).  Callers should only release the lease on a clean
+    /// shutdown; dirty shutdowns must rely on lease expiry as a safety net.
+    #[allow(clippy::cognitive_complexity)] // inflated by tokio::select! + tracing macros
+    async fn stop_with_timeout(self, role: &str, stop_timeout: Duration) -> bool {
         let ActiveRole { child, mut handle } = self;
         child.cancel();
         match timeout(stop_timeout, &mut handle).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(e))) => warn!(role, error = %e, "leader work exited with error"),
-            Ok(Err(e)) => warn!(role, error = %e, "leader work task panicked"),
+            Ok(Ok(Ok(()))) => true,
+            Ok(Ok(Err(e))) => {
+                warn!(role, error = %e, "leader work exited with error");
+                false
+            }
+            Ok(Err(e)) => {
+                warn!(role, error = %e, "leader work task panicked");
+                false
+            }
             Err(_) => {
                 #[allow(clippy::cast_possible_truncation)]
                 let timeout_ms = stop_timeout.as_millis().min(u128::from(u64::MAX)) as u64;
-                warn!(role, timeout_ms, "leader work did not stop in time; aborting task");
+                warn!(
+                    role,
+                    timeout_ms, "leader work did not stop in time; aborting task"
+                );
                 handle.abort();
                 match handle.await {
                     Ok(Ok(())) => {}
-                    Ok(Err(e)) => warn!(role, error = %e, "leader work exited with error after abort"),
+                    Ok(Err(e)) => {
+                        warn!(role, error = %e, "leader work exited with error after abort");
+                    }
                     Err(e) if e.is_cancelled() => {}
                     Err(e) => warn!(role, error = %e, "leader work task panicked after abort"),
                 }
+                false
             }
         }
     }
 
+    #[allow(clippy::cognitive_complexity)] // inflated by tracing macros
     async fn await_and_log(self, role: &str) {
         match self.handle.await {
             Ok(Ok(())) => warn!(role, "leader work exited unexpectedly (Ok)"),
@@ -371,19 +436,27 @@ async fn stop_and_release(
     lease_name: &str,
     identity: &str,
 ) {
-    if let Some(r) = active.take() {
-        r.stop(role).await;
-    }
-    if let Err(e) = release_lease(api, lease_name, identity).await {
-        warn!(role, error = %e, "best-effort lease release failed");
+    let clean = match active.take() {
+        Some(r) => r.stop_with_timeout(role, WORK_STOP_TIMEOUT).await,
+        None => true,
+    };
+    if clean {
+        if let Err(e) = release_lease(api, lease_name, identity).await {
+            warn!(role, error = %e, "best-effort lease release failed");
+        }
+    } else {
+        warn!(
+            role,
+            "skipping lease release after dirty shutdown; relying on lease expiry"
+        );
     }
 }
 
 /// Best-effort release: clear `holderIdentity` to speed up re-election.
 async fn release_lease(api: &Api<Lease>, lease_name: &str, identity: &str) -> anyhow::Result<()> {
-    let lease = api
-        .get(lease_name)
+    let lease = timeout(K8S_API_TIMEOUT, api.get(lease_name))
         .await
+        .with_context(|| format!("timeout getting lease {lease_name} for release by {identity}"))?
         .with_context(|| format!("get lease {lease_name} for release by {identity}"))?;
     let (holder, _, _) = read_lease_state(&lease);
 
@@ -395,25 +468,49 @@ async fn release_lease(api: &Api<Lease>, lease_name: &str, identity: &str) -> an
     new_lease.spec.get_or_insert_default().holder_identity = None;
 
     // resourceVersion-guarded replace; conflict means someone else already updated.
-    match api.replace(lease_name, &PostParams::default(), &new_lease).await {
-        Ok(_) => {}
-        Err(kube::Error::Api(resp)) if resp.code == 409 => {}
-        Err(e) => {
+    match timeout(
+        K8S_API_TIMEOUT,
+        api.replace(lease_name, &PostParams::default(), &new_lease),
+    )
+    .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(kube::Error::Api(resp))) if resp.code == 409 => {}
+        Ok(Err(e)) => {
             return Err(e).with_context(|| {
                 format!("replace lease {lease_name} to release leadership for {identity}")
             });
+        }
+        Err(_) => {
+            return Err(anyhow!(
+                "timeout replacing lease {lease_name} to release leadership for {identity}"
+            ));
         }
     }
     Ok(())
 }
 
-async fn ensure_lease_exists(api: &Api<Lease>, namespace: &str, lease_name: &str) -> anyhow::Result<()> {
-    match api.get(lease_name).await {
-        Ok(_) => return Ok(()),
-        Err(kube::Error::Api(resp)) if resp.code == 404 => {}
-        Err(e) => {
-            return Err(e)
-                .with_context(|| format!("get Lease {} before create", lease_ref(namespace, lease_name)));
+async fn ensure_lease_exists(
+    api: &Api<Lease>,
+    namespace: &str,
+    lease_name: &str,
+) -> anyhow::Result<()> {
+    match timeout(K8S_API_TIMEOUT, api.get(lease_name)).await {
+        Ok(Ok(_)) => return Ok(()),
+        Ok(Err(kube::Error::Api(resp))) if resp.code == 404 => {}
+        Ok(Err(e)) => {
+            return Err(e).with_context(|| {
+                format!(
+                    "get Lease {} before create",
+                    lease_ref(namespace, lease_name)
+                )
+            });
+        }
+        Err(_) => {
+            return Err(anyhow!(
+                "timeout getting Lease {} before create",
+                lease_ref(namespace, lease_name)
+            ));
         }
     }
 
@@ -424,10 +521,16 @@ async fn ensure_lease_exists(api: &Api<Lease>, namespace: &str, lease_name: &str
         },
         ..Lease::default()
     };
-    match api.create(&PostParams::default(), &lease).await {
-        Ok(_) => Ok(()),
-        Err(kube::Error::Api(resp)) if resp.code == 409 => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("create Lease {}", lease_ref(namespace, lease_name))),
+    match timeout(K8S_API_TIMEOUT, api.create(&PostParams::default(), &lease)).await {
+        Ok(Ok(_)) => Ok(()),
+        Ok(Err(kube::Error::Api(resp))) if resp.code == 409 => Ok(()),
+        Ok(Err(e)) => {
+            Err(e).with_context(|| format!("create Lease {}", lease_ref(namespace, lease_name)))
+        }
+        Err(_) => Err(anyhow!(
+            "timeout creating Lease {}",
+            lease_ref(namespace, lease_name)
+        )),
     }
 }
 
@@ -462,25 +565,94 @@ fn lease_ref(namespace: &str, lease_name: &str) -> String {
     format!("{namespace}/{lease_name}")
 }
 
+/// Exponential backoff with "equal jitter" for leader acquisition retries.
+///
+/// Strategy: each delay is `base/2 + rand(0..base/2)`, where `base` doubles
+/// on each attempt up to `max_delay`.  This is the "equal jitter" approach
+/// from the AWS Architecture Blog — it guarantees a minimum forward progress
+/// of `base/2` while still desynchronising competing pods effectively.
+///
+/// The internal PRNG is a 64-bit xorshift64* — fast, non-cryptographic,
+/// and good enough for retry jitter.  Seeded once at construction from
+/// coarse time + thread id so that concurrent `Backoff` instances on
+/// different pods (or even different tasks within the same pod) diverge.
 struct Backoff {
-    next: Duration,
+    initial: Duration,
+    max_delay: Duration,
+    current: Duration,
+    rng: XorShift64,
 }
 
 impl Backoff {
     fn new() -> Self {
+        let initial = Duration::from_millis(200);
         Self {
-            next: Duration::from_millis(200),
+            initial,
+            max_delay: Duration::from_secs(5),
+            current: initial,
+            rng: XorShift64::seed_from_time(),
         }
     }
 
     fn reset(&mut self) {
-        self.next = Duration::from_millis(200);
+        self.current = self.initial;
     }
 
     fn next_delay(&mut self) -> Duration {
-        let out = self.next;
-        self.next = std::cmp::min(self.next * 2, Duration::from_secs(5));
-        out
+        let base = self.current;
+        // Advance for the *next* call, clamped to max.
+        self.current = self.max_delay.min(base.saturating_mul(2));
+
+        // Equal jitter: deterministic half + random half.
+        #[allow(clippy::cast_possible_truncation)] // clamped to u64::MAX
+        let base_ms = base.as_millis().min(u128::from(u64::MAX)) as u64;
+        let half = base_ms >> 1;
+        let jitter = if half > 0 {
+            self.rng.next_u64() % half
+        } else {
+            0
+        };
+        Duration::from_millis(half + jitter)
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Tiny non-cryptographic PRNG (xorshift64*)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Minimal xorshift64* — 8 bytes of state, period 2^64-1.
+///
+/// NOT suitable for cryptography; perfectly fine for retry jitter.
+struct XorShift64 {
+    state: u64,
+}
+
+impl XorShift64 {
+    /// Seed from coarse monotonic time and thread identity.
+    ///
+    /// Two `Backoff` instances created in different pods (or different tasks)
+    /// will almost certainly get different seeds, which is all we need.
+    fn seed_from_time() -> Self {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        std::time::SystemTime::now().hash(&mut h);
+        std::thread::current().id().hash(&mut h);
+        let s = h.finish();
+        // xorshift64 requires a non-zero seed.
+        Self {
+            state: if s == 0 { 1 } else { s },
+        }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut s = self.state;
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        self.state = s;
+        // xorshift64*: multiply by a large odd constant for better bit mixing.
+        s.wrapping_mul(0x2545_f491_4f6c_dd1d)
     }
 }
 
@@ -493,20 +665,23 @@ mod tests {
 
     #[test]
     fn validate_rejects_subsecond_lease_duration() {
-        let err = K8sLeaseConfig::from_env("mini-chat")
+        let err = test_config()
             .with_timing(Duration::from_millis(500), Duration::from_millis(100))
             .validate()
-            .unwrap_err();
+            .expect_err("should reject sub-second lease_duration");
 
         assert!(err.to_string().contains("at least 1 second"));
     }
 
     #[test]
     fn validate_rejects_lease_duration_outside_k8s_range() {
-        let err = K8sLeaseConfig::from_env("mini-chat")
-            .with_timing(Duration::from_secs(i32::MAX as u64 + 1), Duration::from_secs(1))
+        let err = test_config()
+            .with_timing(
+                Duration::from_secs(i32::MAX as u64 + 1),
+                Duration::from_secs(1),
+            )
             .validate()
-            .unwrap_err();
+            .expect_err("should reject lease_duration outside i32 range");
 
         assert!(err.to_string().contains("i32 seconds range"));
     }
@@ -514,7 +689,9 @@ mod tests {
     #[test]
     fn cannot_acquire_when_other_holder_is_still_fresh() {
         let now = Timestamp::now();
-        let renew_time = now.checked_add(SignedDuration::from_secs(-3)).unwrap();
+        let renew_time = now
+            .checked_add(SignedDuration::from_secs(-3))
+            .expect("trivial timestamp arithmetic");
 
         let acquired = can_acquire_leadership(Some("pod-b"), Some(renew_time), 15, "pod-a", now);
 
@@ -524,7 +701,9 @@ mod tests {
     #[test]
     fn can_acquire_when_other_holder_is_expired() {
         let now = Timestamp::now();
-        let renew_time = now.checked_add(SignedDuration::from_secs(-30)).unwrap();
+        let renew_time = now
+            .checked_add(SignedDuration::from_secs(-30))
+            .expect("trivial timestamp arithmetic");
 
         let acquired = can_acquire_leadership(Some("pod-b"), Some(renew_time), 15, "pod-a", now);
 
@@ -534,7 +713,9 @@ mod tests {
     #[test]
     fn can_acquire_when_already_holder() {
         let now = Timestamp::now();
-        let renew_time = now.checked_add(SignedDuration::from_secs(-3)).unwrap();
+        let renew_time = now
+            .checked_add(SignedDuration::from_secs(-3))
+            .expect("trivial timestamp arithmetic");
 
         let acquired = can_acquire_leadership(Some("pod-a"), Some(renew_time), 15, "pod-a", now);
 
@@ -554,9 +735,20 @@ mod tests {
         let role = ActiveRole { child, handle };
 
         let begun = Instant::now();
-        role.stop_with_timeout("test", Duration::from_millis(20)).await;
+        role.stop_with_timeout("test", Duration::from_millis(20))
+            .await;
 
         assert!(started.load(Ordering::SeqCst));
         assert!(begun.elapsed() < Duration::from_secs(1));
+    }
+
+    fn test_config() -> K8sLeaseConfig {
+        K8sLeaseConfig {
+            namespace: "default".to_owned(),
+            identity: "pod-a".to_owned(),
+            lease_prefix: "mini-chat".to_owned(),
+            lease_duration: Duration::from_secs(15),
+            renew_period: Duration::from_secs(2),
+        }
     }
 }
