@@ -1,0 +1,675 @@
+name: Publish Single Crate
+
+on:
+  workflow_dispatch:
+    inputs:
+      crate-name:
+        description: "Cargo package name to release (e.g. cf-modkit-db)"
+        required: true
+        type: string
+      bump:
+        description: "Version bump strategy"
+        required: true
+        default: auto
+        type: choice
+        options:
+          - auto
+          - patch
+          - minor
+          - major
+      dry-run:
+        description: "If true, stop after summary"
+        required: true
+        default: true
+        type: boolean
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-crate-${{ github.workflow }}-${{ github.event_name == 'workflow_dispatch' && github.event.inputs['crate-name'] || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Analyze and Create Release PR
+    runs-on: ubuntu-latest
+    if: ${{ github.repository == 'cyberfabric/cyberfabric-core' && github.event_name == 'workflow_dispatch' }}
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      crate_name: ${{ steps.meta.outputs.crate_name }}
+      crate_dir: ${{ steps.meta.outputs.crate_dir }}
+      current_version: ${{ steps.meta.outputs.current_version }}
+      new_version: ${{ steps.version.outputs.new_version }}
+      bump_type: ${{ steps.version.outputs.bump_type }}
+      semver_breaking: ${{ steps.semver.outputs.breaking }}
+      semver_report_file: ${{ steps.semver.outputs.report_file }}
+      changelog_file: ${{ steps.changelog.outputs.changelog_file }}
+      release_branch: ${{ steps.branch.outputs.release_branch }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cmake
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y cmake
+
+      - name: Install Rust toolchain (1.92.0)
+        uses: dtolnay/rust-toolchain@9bc92bc5598b4f3bec5d910d352094982cb0c3b9 # 1.92.0
+
+      - name: Install release tooling
+        uses: taiki-e/install-action@30eab0fabba9ea3f522099957e668b21876aa39e # v2.66.6
+        with:
+          tool: cargo-semver-checks,git-cliff
+
+      - name: Resolve crate metadata
+        id: meta
+        env:
+          INPUT_CRATE: ${{ github.event.inputs['crate-name'] }}
+        run: |
+          set -euxo pipefail
+
+          cargo metadata --format-version 1 --no-deps > metadata.json
+
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+
+          crate = os.environ["INPUT_CRATE"]
+          root = pathlib.Path(os.environ["GITHUB_WORKSPACE"]).resolve()
+          data = json.loads(pathlib.Path("metadata.json").read_text())
+
+          pkg = None
+          for p in data.get("packages", []):
+              if p.get("name") == crate:
+                  pkg = p
+                  break
+
+          if pkg is None:
+              print(f"::error::crate '{crate}' not found in workspace metadata")
+              sys.exit(1)
+
+          publish = pkg.get("publish")
+          if publish is False:
+              print(f"::error::crate '{crate}' has publish = false")
+              sys.exit(1)
+          if isinstance(publish, list):
+              if len(publish) == 0:
+                  print(f"::error::crate '{crate}' has publish = [] (empty list)")
+                  sys.exit(1)
+              if "crates-io" not in publish:
+                  print(f"::error::crate '{crate}' is not publishable to crates.io (allowed registries: {publish})")
+                  sys.exit(1)
+
+          manifest_path = pathlib.Path(pkg["manifest_path"]).resolve()
+          crate_dir = manifest_path.parent.relative_to(root)
+          version = pkg["version"]
+
+          out = pathlib.Path(os.environ["GITHUB_OUTPUT"])
+          with out.open("a", encoding="utf-8") as f:
+              f.write(f"crate_name={crate}\n")
+              f.write(f"crate_dir={crate_dir.as_posix()}\n")
+              f.write(f"current_version={version}\n")
+          PY
+
+      - name: Detect last release tag
+        id: last_tag
+        env:
+          CRATE: ${{ steps.meta.outputs.crate_name }}
+        run: |
+          set -euxo pipefail
+
+          last_tag="$(git tag --list "${CRATE}/v*" --sort=-v:refname | head -1 || true)"
+          if [ -z "${last_tag}" ]; then
+            base="$(git rev-list --max-parents=0 HEAD | tail -1)"
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            echo "base=${base}" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "tag=${last_tag}" >> "$GITHUB_OUTPUT"
+            echo "base=${last_tag}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Collect commits for crate
+        id: commits
+        env:
+          BASE: ${{ steps.last_tag.outputs.base }}
+          CRATE_DIR: ${{ steps.meta.outputs.crate_dir }}
+        run: |
+          set -euxo pipefail
+
+          git log --no-merges --pretty=format:'%H%x09%s' "${BASE}..HEAD" -- "${CRATE_DIR}" > crate_commits.tsv || true
+          count="$(wc -l < crate_commits.tsv | tr -d ' ')"
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+
+      - name: Build temporary git-cliff config from release-plz template
+        id: cliff_config
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY'
+          import pathlib
+          import tomllib
+
+          data = tomllib.loads(pathlib.Path("release-plz.toml").read_text(encoding="utf-8"))
+          body = data.get("changelog", {}).get("body", "")
+
+          cfg = f"""
+          [changelog]
+          body = '''{body}'''
+          trim = true
+
+          [git]
+          conventional_commits = true
+          filter_unconventional = true
+          split_commits = false
+          topo_order = false
+          sort_commits = "newest"
+          """
+
+          pathlib.Path("cliff.toml").write_text(cfg.strip() + "\n", encoding="utf-8")
+          PY
+
+          echo "config_file=cliff.toml" >> "$GITHUB_OUTPUT"
+
+      - name: Generate changelog fragment
+        id: changelog
+        env:
+          BASE: ${{ steps.last_tag.outputs.base }}
+          CRATE_DIR: ${{ steps.meta.outputs.crate_dir }}
+          CLIFF_CONFIG: ${{ steps.cliff_config.outputs.config_file }}
+        run: |
+          set -euo pipefail
+
+          if [ "${BASE}" = "" ]; then
+            if ! git-cliff --config "${CLIFF_CONFIG}" --include-path "${CRATE_DIR}/**" > CHANGELOG_FRAGMENT.md; then
+              echo "git-cliff failed, falling back to commit-subject changelog"
+              awk -F'\t' 'NF >= 2 { print "- " $2 }' crate_commits.tsv > CHANGELOG_FRAGMENT.md || true
+            fi
+          else
+            if ! git-cliff --config "${CLIFF_CONFIG}" --include-path "${CRATE_DIR}/**" "${BASE}..HEAD" > CHANGELOG_FRAGMENT.md; then
+              echo "git-cliff failed, falling back to commit-subject changelog"
+              awk -F'\t' 'NF >= 2 { print "- " $2 }' crate_commits.tsv > CHANGELOG_FRAGMENT.md || true
+            fi
+          fi
+
+          if [ ! -s CHANGELOG_FRAGMENT.md ]; then
+            echo "No conventional commits found for this crate in the selected range." > CHANGELOG_FRAGMENT.md
+          fi
+
+          echo "changelog_file=CHANGELOG_FRAGMENT.md" >> "$GITHUB_OUTPUT"
+
+      - name: Run semver checks
+        id: semver
+        env:
+          CRATE: ${{ steps.meta.outputs.crate_name }}
+        run: |
+          set -euo pipefail
+
+          report_file="SEMVER_REPORT.txt"
+          exit_code=0
+          cargo semver-checks check-release -p "${CRATE}" > "${report_file}" 2>&1 || exit_code=$?
+
+          # Check for deny-level violations in the report
+          if grep -Eqi 'FAIL|semver violation|required_semver_bump|major' "${report_file}"; then
+            echo "breaking=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "breaking=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "report_file=${report_file}" >> "$GITHUB_OUTPUT"
+          echo "exit_code=${exit_code}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute bump and new version
+        id: version
+        env:
+          INPUT_BUMP: ${{ github.event.inputs.bump }}
+          CURRENT_VERSION: ${{ steps.meta.outputs.current_version }}
+          SEMVER_BREAKING: ${{ steps.semver.outputs.breaking }}
+        run: |
+          set -euxo pipefail
+
+          bump="${INPUT_BUMP}"
+          if [ "${bump}" = "auto" ]; then
+            if [ "${SEMVER_BREAKING}" = "true" ]; then
+              bump="major"
+            elif grep -Eqi 'added|new public|trait impl added|item added' SEMVER_REPORT.txt; then
+              bump="minor"
+            else
+              bump="patch"
+            fi
+          fi
+
+          IFS='.' read -r major minor patch <<< "${CURRENT_VERSION}"
+          case "${bump}" in
+            major)
+              major=$((major + 1))
+              minor=0
+              patch=0
+              ;;
+            minor)
+              minor=$((minor + 1))
+              patch=0
+              ;;
+            patch)
+              patch=$((patch + 1))
+              ;;
+            *)
+              echo "Unknown bump type: ${bump}" >&2
+              exit 1
+              ;;
+          esac
+
+          new_version="${major}.${minor}.${patch}"
+          echo "bump_type=${bump}" >> "$GITHUB_OUTPUT"
+          echo "new_version=${new_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Summary (dry-run gate)
+        env:
+          CRATE: ${{ steps.meta.outputs.crate_name }}
+          CRATE_DIR: ${{ steps.meta.outputs.crate_dir }}
+          CURRENT_VERSION: ${{ steps.meta.outputs.current_version }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          BUMP_TYPE: ${{ steps.version.outputs.bump_type }}
+          LAST_TAG: ${{ steps.last_tag.outputs.tag }}
+          FOUND_TAG: ${{ steps.last_tag.outputs.found }}
+          COMMITS_COUNT: ${{ steps.commits.outputs.count }}
+          DRY_RUN: ${{ github.event.inputs['dry-run'] }}
+        run: |
+          set -euxo pipefail
+
+          {
+            echo "## Crate publish dry-run summary"
+            echo
+            echo "- Crate: \\`${CRATE}\\`"
+            echo "- Directory: \\`${CRATE_DIR}\\`"
+            if [ "${FOUND_TAG}" = "true" ]; then
+              echo "- Last tag: \\`${LAST_TAG}\\`"
+            else
+              echo "- Last tag: _none found_"
+            fi
+            echo "- Commits touching crate since base: ${COMMITS_COUNT}"
+            echo "- Proposed bump: \\`${BUMP_TYPE}\\`"
+            echo "- Proposed version: \\`${CURRENT_VERSION}\\` → \\`${NEW_VERSION}\\`"
+            echo "- dry-run: \\`${DRY_RUN}\\`"
+            echo
+            echo "### Changelog"
+            echo
+            cat CHANGELOG_FRAGMENT.md
+            echo
+            echo "### Semver checks report"
+            echo
+            echo "\\`\\`\\`text"
+            cat SEMVER_REPORT.txt
+            echo "\\`\\`\\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop when dry-run is true
+        if: ${{ github.event.inputs['dry-run'] == 'true' }}
+        run: |
+          echo "Dry-run enabled. Stopping before version bump / PR creation."
+
+      - name: Bump crate version
+        if: ${{ github.event.inputs['dry-run'] == 'false' }}
+        env:
+          CRATE_DIR: ${{ steps.meta.outputs.crate_dir }}
+          CRATE: ${{ steps.meta.outputs.crate_name }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          crate_dir = os.environ["CRATE_DIR"]
+          crate = os.environ["CRATE"]
+          new_version = os.environ["NEW_VERSION"]
+
+          manifest = pathlib.Path(crate_dir) / "Cargo.toml"
+          text = manifest.read_text(encoding="utf-8")
+
+          # Check if crate uses workspace-inherited version
+          uses_workspace_version = bool(re.search(r'(?m)^version\.workspace\s*=\s*true', text))
+
+          if uses_workspace_version:
+              # Update [workspace.package] version in root Cargo.toml
+              root_cargo = pathlib.Path("Cargo.toml")
+              root_text = root_cargo.read_text(encoding="utf-8")
+
+              ws_pkg_start = root_text.find("[workspace.package]")
+              if ws_pkg_start == -1:
+                  print("::error::No [workspace.package] table found in root Cargo.toml", file=sys.stderr)
+                  sys.exit(1)
+
+              next_table = root_text.find("\n[", ws_pkg_start + 1)
+              if next_table == -1:
+                  ws_pkg_block = root_text[ws_pkg_start:]
+                  prefix = root_text[:ws_pkg_start]
+                  suffix = ""
+              else:
+                  ws_pkg_block = root_text[ws_pkg_start:next_table]
+                  prefix = root_text[:ws_pkg_start]
+                  suffix = root_text[next_table:]
+
+              updated_block, n = re.subn(
+                  r'(?m)^version\s*=\s*"[^"]+"\s*$',
+                  f'version = "{new_version}"',
+                  ws_pkg_block,
+                  count=1,
+              )
+
+              if n == 0:
+                  print("::error::No version in [workspace.package] table", file=sys.stderr)
+                  sys.exit(1)
+
+              root_cargo.write_text(prefix + updated_block + suffix, encoding="utf-8")
+              print(f"Updated [workspace.package] version to {new_version} (crate '{crate}' uses version.workspace = true)")
+          else:
+              # Update version directly in crate's Cargo.toml
+              package_start = text.find("[package]")
+              if package_start == -1:
+                  print("::error::No [package] table found", file=sys.stderr)
+                  sys.exit(1)
+
+              next_table = text.find("\n[", package_start + 1)
+              if next_table == -1:
+                  package_block = text[package_start:]
+                  prefix = text[:package_start]
+                  suffix = ""
+              else:
+                  package_block = text[package_start:next_table]
+                  prefix = text[:package_start]
+                  suffix = text[next_table:]
+
+              updated_block, n = re.subn(
+                  r'(?m)^version\s*=\s*"[^"]+"\s*$',
+                  f'version = "{new_version}"',
+                  package_block,
+                  count=1,
+              )
+
+              if n == 0:
+                  print("::error::No explicit version in [package] table", file=sys.stderr)
+                  sys.exit(1)
+
+              manifest.write_text(prefix + updated_block + suffix, encoding="utf-8")
+              print(f"Updated {manifest} version to {new_version}")
+          PY
+
+      - name: Update workspace.dependencies version in root Cargo.toml
+        if: ${{ github.event.inputs['dry-run'] == 'false' }}
+        env:
+          CRATE: ${{ steps.meta.outputs.crate_name }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          set -euxo pipefail
+
+          python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+
+          crate = os.environ["CRATE"]
+          new_version = os.environ["NEW_VERSION"]
+          cargo = pathlib.Path("Cargo.toml")
+          lines = cargo.read_text(encoding="utf-8").splitlines()
+
+          in_ws_deps = False
+          updated = False
+          for idx, line in enumerate(lines):
+              stripped = line.strip()
+              if stripped.startswith("[") and stripped.endswith("]"):
+                  in_ws_deps = stripped == "[workspace.dependencies]"
+                  continue
+
+              if not in_ws_deps:
+                  continue
+
+              # Match both `package = "crate-name"` and direct `crate-name = { ... }`
+              if f'package = "{crate}"' in line or line.strip().startswith(f'{crate} = '):
+                  lines[idx] = re.sub(r'version\s*=\s*"[^"]+"', f'version = "{new_version}"', line)
+                  updated = True
+
+          if updated:
+              cargo.write_text("\n".join(lines) + "\n", encoding="utf-8")
+              print(f"Updated [workspace.dependencies] entry for {crate} to version {new_version}")
+          PY
+
+      - name: Create release branch name
+        id: branch
+        if: ${{ github.event.inputs['dry-run'] == 'false' }}
+        env:
+          CRATE: ${{ steps.meta.outputs.crate_name }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+        run: |
+          set -euxo pipefail
+          echo "release_branch=release/${CRATE}/v${NEW_VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Commit changes
+        id: commit_changes
+        if: ${{ github.event.inputs['dry-run'] == 'false' }}
+        env:
+          CRATE: ${{ steps.meta.outputs.crate_name }}
+          CRATE_DIR: ${{ steps.meta.outputs.crate_dir }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          RELEASE_BRANCH: ${{ steps.branch.outputs.release_branch }}
+        run: |
+          set -euxo pipefail
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git fetch origin "${RELEASE_BRANCH}" || true
+          if git ls-remote --exit-code --heads origin "${RELEASE_BRANCH}" >/dev/null 2>&1; then
+            git checkout -B "${RELEASE_BRANCH}" "origin/${RELEASE_BRANCH}"
+          else
+            git checkout -b "${RELEASE_BRANCH}"
+          fi
+
+          git add "${CRATE_DIR}/Cargo.toml" Cargo.toml
+          if git diff --cached --quiet; then
+            echo "No manifest changes to commit."
+            echo "created_commit=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git commit -m "release(${CRATE}): v${NEW_VERSION}"
+          git push --force-with-lease --set-upstream origin "${RELEASE_BRANCH}"
+          echo "created_commit=true" >> "$GITHUB_OUTPUT"
+
+      - name: Build PR body
+        if: ${{ github.event.inputs['dry-run'] == 'false' && steps.commit_changes.outputs.created_commit == 'true' }}
+        env:
+          CRATE: ${{ steps.meta.outputs.crate_name }}
+          CURRENT_VERSION: ${{ steps.meta.outputs.current_version }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          BUMP: ${{ steps.version.outputs.bump_type }}
+        run: |
+          set -euxo pipefail
+
+          {
+            echo "## Release ${CRATE}"
+            echo
+            echo "- Version: ${CURRENT_VERSION} → ${NEW_VERSION}"
+            echo "- Bump: ${BUMP}"
+            echo
+            echo "### Changelog"
+            echo
+            cat CHANGELOG_FRAGMENT.md
+            echo
+            echo "### Semver checks"
+            echo
+            echo '```text'
+            cat SEMVER_REPORT.txt
+            echo '```'
+          } > PR_BODY.md
+
+      - name: Create release PR
+        if: ${{ github.event.inputs['dry-run'] == 'false' && steps.commit_changes.outputs.created_commit == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CRATE: ${{ steps.meta.outputs.crate_name }}
+          NEW_VERSION: ${{ steps.version.outputs.new_version }}
+          RELEASE_BRANCH: ${{ steps.branch.outputs.release_branch }}
+        run: |
+          set -euxo pipefail
+
+          existing_count="$(gh pr list --head "${RELEASE_BRANCH}" --base main --json number --jq 'length')"
+          if [ "${existing_count}" -gt 0 ]; then
+            echo "A PR for branch ${RELEASE_BRANCH} already exists. Skipping create."
+            exit 0
+          fi
+
+          gh pr create \
+            --base main \
+            --head "${RELEASE_BRANCH}" \
+            --title "release(${CRATE}): v${NEW_VERSION}" \
+            --body-file PR_BODY.md \
+            --label "release-crate"
+
+  tag-and-publish:
+    name: Publish to crates.io and tag
+    runs-on: ubuntu-latest
+    if: >-
+      ${{
+        github.repository == 'cyberfabric/cyberfabric-core'
+        && github.event_name == 'pull_request'
+        && github.event.pull_request.merged == true
+        && contains(join(github.event.pull_request.labels.*.name, ','), 'release-crate')
+      }}
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install cmake
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y cmake
+
+      - name: Install Rust toolchain (1.92.0)
+        uses: dtolnay/rust-toolchain@9bc92bc5598b4f3bec5d910d352094982cb0c3b9 # 1.92.0
+
+      - name: Extract crate and version from branch or cargo metadata
+        id: parsed
+        env:
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+
+          crate_name=""
+          new_version=""
+
+          # Try to parse from branch name: release/<crate>/v<version>
+          if [[ "${HEAD_REF}" =~ ^release/([^/]+)/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            crate_name="${BASH_REMATCH[1]}"
+            new_version="${BASH_REMATCH[2]}"
+            echo "Parsed from branch: crate=${crate_name}, version=${new_version}"
+          fi
+
+          # Validate against cargo metadata if we got values from branch
+          if [ -n "${crate_name}" ] && [ -n "${new_version}" ]; then
+            cargo metadata --format-version 1 --no-deps > metadata.json
+            pkg_version="$(jq -r --arg name "${crate_name}" '.packages[] | select(.name == $name) | .version' metadata.json)"
+
+            if [ -z "${pkg_version}" ] || [ "${pkg_version}" = "null" ]; then
+              echo "::warning::Crate '${crate_name}' not found in workspace, falling back to cargo metadata scan"
+              crate_name=""
+              new_version=""
+            elif [ "${pkg_version}" != "${new_version}" ]; then
+              echo "::warning::Branch version (${new_version}) differs from manifest (${pkg_version}), using manifest version"
+              new_version="${pkg_version}"
+            fi
+          fi
+
+          # Fallback: scan git diff to find changed Cargo.toml and extract crate info
+          if [ -z "${crate_name}" ] || [ -z "${new_version}" ]; then
+            echo "Falling back to git diff + cargo metadata to find released crate"
+            cargo metadata --format-version 1 --no-deps > metadata.json
+
+            # Find Cargo.toml files changed in the merge commit
+            changed_manifests="$(git diff --name-only HEAD~1 HEAD -- '*/Cargo.toml' 'Cargo.toml' || true)"
+
+            for manifest in ${changed_manifests}; do
+              if [ "${manifest}" = "Cargo.toml" ]; then
+                continue  # Skip root manifest
+              fi
+
+              manifest_dir="$(dirname "${manifest}")"
+              pkg_info="$(jq -r --arg dir "${manifest_dir}" '.packages[] | select(.manifest_path | endswith($dir + "/Cargo.toml")) | "\(.name) \(.version)"' metadata.json | head -1)"
+
+              if [ -n "${pkg_info}" ]; then
+                crate_name="$(echo "${pkg_info}" | awk '{print $1}')"
+                new_version="$(echo "${pkg_info}" | awk '{print $2}')"
+                echo "Found crate from changed manifest: crate=${crate_name}, version=${new_version}"
+                break
+              fi
+            done
+          fi
+
+          if [ -z "${crate_name}" ] || [ -z "${new_version}" ]; then
+            echo "::error::Could not determine crate name and version from branch ref or repository state"
+            exit 1
+          fi
+
+          echo "crate_name=${crate_name}" >> "$GITHUB_OUTPUT"
+          echo "new_version=${new_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish crate
+        env:
+          CRATE_NAME: ${{ steps.parsed.outputs.crate_name }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+        run: |
+          set -euxo pipefail
+          cargo publish -p "${CRATE_NAME}"
+
+      - name: Create and push git tag
+        env:
+          CRATE_NAME: ${{ steps.parsed.outputs.crate_name }}
+          NEW_VERSION: ${{ steps.parsed.outputs.new_version }}
+        run: |
+          set -euxo pipefail
+
+          tag="${CRATE_NAME}/v${NEW_VERSION}"
+          if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+            echo "Tag ${tag} already exists, skipping."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "${tag}"
+          git push origin "${tag}"
