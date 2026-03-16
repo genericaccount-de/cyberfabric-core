@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use credstore_sdk::{OwnerId, SecretRef, SecretValue, SharingMode, TenantId};
 use modkit_macros::domain_model;
 use modkit_security::SecurityContext;
+use uuid::Uuid;
 
 use crate::config::StaticCredStorePluginConfig;
 
@@ -63,10 +64,10 @@ impl Service {
         let mut global_secrets: HashMap<SecretRef, SecretEntry> = HashMap::new();
 
         for entry in &cfg.secrets {
-            if entry.tenant_id == Some(TenantId::nil()) {
+            if entry.tenant_id == Some(Uuid::nil()) {
                 anyhow::bail!("secret '{}': tenant_id must not be nil UUID", entry.key);
             }
-            if entry.owner_id == Some(OwnerId::nil()) {
+            if entry.owner_id == Some(Uuid::nil()) {
                 anyhow::bail!("secret '{}': owner_id must not be nil UUID", entry.key);
             }
 
@@ -110,9 +111,10 @@ impl Service {
                     }
                     global_secrets.insert(key, secret_entry);
                 }
-                (SharingMode::Shared, Some(tenant_id)) => {
+                (SharingMode::Shared, Some(raw_tenant_id)) => {
                     // Shared secret: tenant-scoped, visible to descendants
                     // via gateway hierarchical resolution.
+                    let tenant_id = TenantId(raw_tenant_id);
                     let secret_entry = SecretEntry {
                         value: SecretValue::from(entry.value.as_str()),
                         sharing,
@@ -130,12 +132,12 @@ impl Service {
                     shared_secrets.insert(map_key, secret_entry);
                 }
                 (SharingMode::Tenant, _) => {
-                    let tenant_id = entry.tenant_id.ok_or_else(|| {
+                    let tenant_id = TenantId(entry.tenant_id.ok_or_else(|| {
                         anyhow::anyhow!(
                             "secret '{}': tenant sharing mode requires tenant_id",
                             entry.key
                         )
-                    })?;
+                    })?);
                     let secret_entry = SecretEntry {
                         value: SecretValue::from(entry.value.as_str()),
                         sharing,
@@ -153,19 +155,19 @@ impl Service {
                     tenant_secrets.insert(map_key, secret_entry);
                 }
                 (SharingMode::Private, _) => {
-                    let tenant_id = entry.tenant_id.ok_or_else(|| {
+                    let tenant_id = TenantId(entry.tenant_id.ok_or_else(|| {
                         anyhow::anyhow!(
                             "secret '{}': private sharing mode requires tenant_id",
                             entry.key
                         )
-                    })?;
+                    })?);
                     // owner_id is guaranteed Some by the validation above.
-                    let owner_id = entry.owner_id.ok_or_else(|| {
+                    let owner_id = OwnerId(entry.owner_id.ok_or_else(|| {
                         anyhow::anyhow!(
                             "secret '{}': private sharing mode requires owner_id",
                             entry.key
                         )
-                    })?;
+                    })?);
                     let secret_entry = SecretEntry {
                         value: SecretValue::from(entry.value.as_str()),
                         sharing,
@@ -199,8 +201,8 @@ impl Service {
     /// Lookup order: **Private → Tenant → Shared → Global** (most specific first).
     #[must_use]
     pub fn get(&self, ctx: &SecurityContext, key: &SecretRef) -> Option<&SecretEntry> {
-        let tenant_id = ctx.subject_tenant_id();
-        let subject_id = ctx.subject_id();
+        let tenant_id = TenantId(ctx.subject_tenant_id());
+        let subject_id = OwnerId(ctx.subject_id());
 
         self.private_secrets
             .get(&(tenant_id, subject_id, key.clone()))
@@ -281,8 +283,8 @@ mod tests {
 
         let entry = service.get(&ctx(tenant_a(), owner_a()), &key).unwrap();
         assert_eq!(entry.value.as_bytes(), b"sk-test-123");
-        assert_eq!(entry.owner_id, owner_a());
-        assert_eq!(entry.owner_tenant_id, tenant_a());
+        assert_eq!(entry.owner_id, OwnerId(owner_a()));
+        assert_eq!(entry.owner_tenant_id, TenantId(tenant_a()));
         assert_eq!(entry.sharing, SharingMode::Private);
     }
 
@@ -391,7 +393,7 @@ mod tests {
         let e = service.get(&ctx(tenant_a(), owner_a()), &key).unwrap();
         assert_eq!(e.value.as_bytes(), b"shared-val");
         assert_eq!(e.sharing, SharingMode::Shared);
-        assert_eq!(e.owner_tenant_id, tenant_a());
+        assert_eq!(e.owner_tenant_id, TenantId(tenant_a()));
 
         // Different tenant — not accessible at plugin level
         // (gateway walk-up would call the plugin with parent tenant_id)
@@ -765,7 +767,7 @@ mod tests {
         let key = SecretRef::new("k").unwrap();
         let e = service.get(&ctx(tenant_a(), owner_a()), &key).unwrap();
         assert_eq!(e.sharing, SharingMode::Shared);
-        assert_eq!(e.owner_tenant_id, tenant_a());
+        assert_eq!(e.owner_tenant_id, TenantId(tenant_a()));
     }
 
     #[test]

@@ -1,3 +1,4 @@
+# Updated: 2026-03-13 by Constructor Tech
 [workspace]
 members = [
     "lint_utils",
@@ -21,7 +22,10 @@ members = [
     "de09_gts_layer/de0902_no_schema_for_on_gts_structs",
     "de03_domain_layer/de0309_must_have_domain_model",
     "de05_client_layer/de0504_client_versioning",
+    "de07_security/de0707_drop_zeroize",
     "de13_common_patterns/de1301_no_print_macros",
+    # "de13_common_patterns/de1302_error_from_to_string",
+    "de13_common_patterns/de1303_no_primitive_type_alias",
 ]
 resolver = "3"
 

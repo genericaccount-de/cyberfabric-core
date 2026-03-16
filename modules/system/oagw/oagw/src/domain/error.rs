@@ -135,7 +135,7 @@ impl From<tenant_resolver_sdk::TenantResolverError> for DomainError {
                 tracing::warn!(tenant_id = %tenant_id, "tenant not found during hierarchy resolution");
                 Self::NotFound {
                     entity: "tenant",
-                    id: tenant_id,
+                    id: tenant_id.0,
                 }
             }
             TenantResolverError::Unauthorized => Self::Forbidden {

@@ -527,7 +527,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -573,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-db"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -603,7 +603,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-db-macros"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "heck 0.5.0",
  "proc-macro-error2",
@@ -614,7 +614,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-errors"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "axum 0.8.8",
  "http",
@@ -625,7 +625,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-errors-macro"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-macros"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -647,7 +647,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-odata"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "base64",
  "bigdecimal",
@@ -666,7 +666,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-sdk"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "cf-modkit-odata",
  "cf-modkit-security",
@@ -676,7 +676,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-security"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "anyhow",
  "postcard",
@@ -688,7 +688,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-utils"
-version = "0.5.4"
+version = "0.5.5"
 dependencies = [
  "humantime",
  "regex",
@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "cf-system-sdk-directory"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -707,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "cf-system-sdks"
-version = "0.1.24"
+version = "0.1.25"
 dependencies = [
  "cf-system-sdk-directory",
 ]
@@ -1066,6 +1066,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "de0707_drop_zeroize"
+version = "0.1.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "lint_utils",
+]
+
+[[package]]
 name = "de0801_api_endpoint_version"
 version = "0.1.0"
 dependencies = [
@@ -1135,6 +1145,18 @@ dependencies = [
  "dylint_testing",
  "lint_utils",
  "tokio",
+]
+
+[[package]]
+name = "de1303_no_primitive_type_alias"
+version = "0.1.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "lint_utils",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

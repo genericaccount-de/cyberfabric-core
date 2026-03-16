@@ -4,6 +4,13 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::config::TokenCacheConfig;
+use crate::domain::services::{
+    ControlPlaneService, ControlPlaneServiceImpl, DataPlaneService, EndpointSelector,
+    ServiceGatewayClientV1Facade,
+};
+use crate::infra::proxy::DataPlaneServiceImpl;
+use crate::infra::storage::{InMemoryRouteRepo, InMemoryUpstreamRepo};
 use async_trait::async_trait;
 use authz_resolver_sdk::{
     AuthZResolverClient, AuthZResolverError, EvaluationRequest, EvaluationResponse,
@@ -11,6 +18,7 @@ use authz_resolver_sdk::{
 };
 use credstore_sdk::{
     CredStoreClientV1, CredStoreError, GetSecretResponse, SecretRef, SecretValue, SharingMode,
+    TenantId as CredstoreTenantId,
 };
 use modkit::client_hub::ClientHub;
 use modkit_security::SecurityContext;
@@ -20,15 +28,6 @@ use tenant_resolver_sdk::{
     GetTenantsOptions, IsAncestorOptions, TenantId, TenantInfo, TenantRef, TenantResolverClient,
     TenantResolverError, TenantStatus,
 };
-use uuid::Uuid;
-
-use crate::config::TokenCacheConfig;
-use crate::domain::services::{
-    ControlPlaneService, ControlPlaneServiceImpl, DataPlaneService, EndpointSelector,
-    ServiceGatewayClientV1Facade,
-};
-use crate::infra::proxy::DataPlaneServiceImpl;
-use crate::infra::storage::{InMemoryRouteRepo, InMemoryUpstreamRepo};
 
 /// Build an allow-all `PolicyEnforcer` for tests.
 pub fn allow_all_enforcer() -> PolicyEnforcer {
@@ -166,7 +165,7 @@ impl CredStoreClientV1 for MockCredStoreClient {
     ) -> Result<Option<GetSecretResponse>, CredStoreError> {
         Ok(self.store.get(key.as_ref()).map(|v| GetSecretResponse {
             value: SecretValue::new(v.clone()),
-            owner_tenant_id: Uuid::nil(),
+            owner_tenant_id: CredstoreTenantId::nil(),
             sharing: SharingMode::default(),
             is_inherited: false,
         }))

@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use credstore_sdk::{
-    CredStoreError, CredStorePluginClientV1, SecretMetadata, SecretValue, SharingMode,
+    CredStoreError, CredStorePluginClientV1, OwnerId, SecretMetadata, SecretValue, SharingMode,
+    TenantId,
 };
 use modkit_security::SecurityContext;
 use types_registry_sdk::{
@@ -100,9 +101,9 @@ impl MockPlugin {
     #[must_use]
     pub fn returns(meta: Option<&SecretMetadata>) -> Arc<Self> {
         let bytes = meta.map(|m| m.value.as_bytes().to_vec());
-        let owner_id = meta.map_or(Uuid::nil(), |m| m.owner_id);
+        let owner_id = meta.map_or(OwnerId::nil(), |m| m.owner_id);
         let sharing = meta.map_or(SharingMode::Tenant, |m| m.sharing);
-        let owner_tenant_id = meta.map_or(Uuid::nil(), |m| m.owner_tenant_id);
+        let owner_tenant_id = meta.map_or(TenantId::nil(), |m| m.owner_tenant_id);
         Arc::new(Self {
             handler: Arc::new(move || {
                 Ok(bytes.as_ref().map(|b| SecretMetadata {

@@ -1,16 +1,62 @@
+// Updated: 2026-03-16 by Constructor Tech
 use std::fmt;
 
 use serde::de::Deserializer;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+use zeroize::Zeroize;
 
 use crate::error::CredStoreError;
 
 /// Tenant identifier, matching `tenant-resolver-sdk` convention.
-pub type TenantId = Uuid;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TenantId(pub Uuid);
+
+impl TenantId {
+    /// Returns the nil UUID wrapped as a `TenantId`.
+    #[must_use]
+    pub fn nil() -> Self {
+        Self(Uuid::nil())
+    }
+
+    /// Returns `true` if the inner UUID is the nil UUID.
+    #[must_use]
+    pub fn is_nil(&self) -> bool {
+        self.0.is_nil()
+    }
+}
+
+impl fmt::Display for TenantId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
 
 /// Owner identifier, representing `SecurityContext.subject_id()`.
-pub type OwnerId = Uuid;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct OwnerId(pub Uuid);
+
+impl OwnerId {
+    /// Returns the nil UUID wrapped as an `OwnerId`.
+    #[must_use]
+    pub fn nil() -> Self {
+        Self(Uuid::nil())
+    }
+
+    /// Returns `true` if the inner UUID is the nil UUID.
+    #[must_use]
+    pub fn is_nil(&self) -> bool {
+        self.0.is_nil()
+    }
+}
+
+impl fmt::Display for OwnerId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
 
 /// A validated secret reference key.
 ///
@@ -109,7 +155,7 @@ impl From<&str> for SecretValue {
 
 impl Drop for SecretValue {
     fn drop(&mut self) {
-        self.0.iter_mut().for_each(|b| *b = 0);
+        self.0.zeroize();
     }
 }
 
@@ -233,7 +279,7 @@ mod tests {
     fn get_secret_response_debug_redacts_value() {
         let resp = GetSecretResponse {
             value: SecretValue::from("secret"),
-            owner_tenant_id: Uuid::nil(),
+            owner_tenant_id: TenantId::nil(),
             sharing: SharingMode::Shared,
             is_inherited: true,
         };
@@ -247,9 +293,9 @@ mod tests {
     fn secret_metadata_debug_redacts_value() {
         let meta = SecretMetadata {
             value: SecretValue::from("secret"),
-            owner_id: Uuid::nil(),
+            owner_id: OwnerId::nil(),
             sharing: SharingMode::Tenant,
-            owner_tenant_id: Uuid::nil(),
+            owner_tenant_id: TenantId::nil(),
         };
         let debug = format!("{meta:?}");
         assert!(debug.contains("[REDACTED]"));

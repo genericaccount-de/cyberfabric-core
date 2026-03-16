@@ -27,7 +27,9 @@ make gts-docs-test       # Run unit tests for GTS validator
 - ✅ DE0204: DTOs Must Have ToSchema Derive
 
 ### Domain Layer (DE03xx)
-- TODO
+- ✅ DE0301: No Infra in Domain
+- ✅ DE0308: No HTTP Types in Domain
+- ✅ DE0309: Must Have Domain Model
 
 ### Infrastructure/storage Layer (DE04xx)
 - TODO
@@ -39,7 +41,8 @@ make gts-docs-test       # Run unit tests for GTS validator
 - TODO
 
 ### Security (DE07xx)
-- TODO
+- ✅ DE0706: No Direct SQLx
+- ✅ DE0707: Drop Zeroize (sensitive types)
 
 ### REST Conventions (DE08xx)
 - ✅ DE0801: API Endpoint Must Have Version
@@ -61,6 +64,8 @@ make gts-docs-test       # Run unit tests for GTS validator
 
 ### Common patterns (DE13xx)
 - ✅ DE1301: No Print/Debug Macros in libraries/modules
+- ✅ DE1302: No `.to_string()` in Error From impls (preserve error chain)
+- ✅ DE1303: No `pub type X = primitive`; use newtype for type safety
 
 ## Examples
 

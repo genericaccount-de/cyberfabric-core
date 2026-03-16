@@ -133,7 +133,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
 
-    use credstore_sdk::{SecretMetadata, SecretValue, SharingMode};
+    use credstore_sdk::{OwnerId, SecretMetadata, SecretValue, SharingMode, TenantId};
     use modkit::client_hub::{ClientHub, ClientScope};
     use types_registry_sdk::{GtsEntity, TypesRegistryError};
     use uuid::Uuid;
@@ -376,9 +376,9 @@ mod tests {
         let instance_id = test_instance_id();
         let meta = SecretMetadata {
             value: SecretValue::from("s3cr3t"),
-            owner_id: Uuid::nil(),
+            owner_id: OwnerId::nil(),
             sharing: SharingMode::Tenant,
-            owner_tenant_id: Uuid::nil(),
+            owner_tenant_id: TenantId::nil(),
         };
         let hub = hub_with_registry_and_plugin(
             &instance_id,
@@ -394,7 +394,7 @@ mod tests {
         assert_eq!(resp.value.as_bytes(), b"s3cr3t");
         assert_eq!(resp.sharing, SharingMode::Tenant);
         assert!(!resp.is_inherited, "is_inherited must always be false here");
-        assert_eq!(resp.owner_tenant_id, Uuid::nil());
+        assert_eq!(resp.owner_tenant_id, TenantId::nil());
     }
 
     #[tokio::test]

@@ -253,6 +253,7 @@ mod tests {
 
     use credstore_sdk::{
         CredStoreClientV1, CredStoreError, GetSecretResponse, SecretRef, SecretValue, SharingMode,
+        TenantId as CredstoreTenantId,
     };
 
     use crate::domain::plugin::{AuthContext, AuthPlugin, PluginError};
@@ -473,7 +474,7 @@ mod tests {
             ) -> Result<Option<GetSecretResponse>, CredStoreError> {
                 Ok(Some(GetSecretResponse {
                     value: SecretValue::new(vec![0xFF, 0xFE]),
-                    owner_tenant_id: Uuid::nil(),
+                    owner_tenant_id: CredstoreTenantId::nil(),
                     sharing: SharingMode::default(),
                     is_inherited: false,
                 }))

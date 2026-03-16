@@ -425,7 +425,7 @@ impl ControlPlaneServiceImpl {
             .tenant_resolver
             .get_ancestors(
                 ctx,
-                tenant_id,
+                tenant_resolver_sdk::TenantId(tenant_id),
                 &tenant_resolver_sdk::GetAncestorsOptions::default(),
             )
             .await?;
@@ -433,7 +433,7 @@ impl ControlPlaneServiceImpl {
         let mut chain = Vec::with_capacity(1 + ancestors_resp.ancestors.len());
         chain.push(tenant_id);
         for ancestor in &ancestors_resp.ancestors {
-            chain.push(ancestor.id);
+            chain.push(ancestor.id.0);
         }
         Ok(chain)
     }
@@ -1429,6 +1429,7 @@ mod tests {
         MockCredStoreClient, MockTenantResolverClient, allow_all_enforcer,
     };
     use crate::infra::storage::{InMemoryRouteRepo, InMemoryUpstreamRepo};
+    use tenant_resolver_sdk::TenantId;
 
     fn make_service() -> ControlPlaneServiceImpl {
         ControlPlaneServiceImpl::new(
@@ -2140,7 +2141,8 @@ mod tests {
 
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Create upstream in root tenant with inherit sharing (visible to descendants).
@@ -2169,7 +2171,8 @@ mod tests {
 
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Create upstream in root with inherit sharing.
@@ -2202,7 +2205,8 @@ mod tests {
     async fn resolve_alias_private_ancestor_not_visible() {
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Create upstream in root with all-private sharing (default).
@@ -2228,7 +2232,11 @@ mod tests {
         let root = Uuid::new_v4();
         let parent = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, parent, child]);
+        let resolver = MockTenantResolverClient::with_hierarchy(vec![
+            TenantId(root),
+            TenantId(parent),
+            TenantId(child),
+        ]);
         let svc = make_service_with_resolver(resolver);
 
         // Create disabled upstream in parent with inherit sharing.
@@ -2268,7 +2276,8 @@ mod tests {
 
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Create disabled upstream in root with inherit sharing.
@@ -2298,7 +2307,8 @@ mod tests {
 
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Create enabled upstream in root with inherit sharing.
@@ -2335,7 +2345,8 @@ mod tests {
     async fn resolve_alias_no_match_in_tenant_chain_returns_not_found() {
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // No upstreams created anywhere.
@@ -2671,7 +2682,8 @@ mod tests {
     async fn bind_rejects_auth_override_on_enforce() {
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Create upstream in root with auth sharing = enforce.
@@ -2711,7 +2723,8 @@ mod tests {
     async fn bind_rejects_rate_limit_override_on_private() {
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Create upstream in root with rate_limit sharing = private.
@@ -2749,7 +2762,8 @@ mod tests {
     async fn bind_allows_inherit_override_with_permissions() {
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Create upstream in root with inherit sharing.
@@ -2780,7 +2794,8 @@ mod tests {
     async fn bind_no_ancestor_match_creates_normally() {
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // No upstream in root. Child creates fresh upstream — no permission checks needed.
@@ -2809,7 +2824,8 @@ mod tests {
     async fn bind_rejects_inaccessible_secret_ref() {
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         // No secrets in credstore.
         let svc = make_service_with_resolver_and_creds(resolver, vec![]);
 
@@ -2846,7 +2862,8 @@ mod tests {
     async fn bind_allows_accessible_secret_ref() {
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver_and_creds(
             resolver,
             vec![("my-key".into(), "secret-value".into())],
@@ -2876,7 +2893,8 @@ mod tests {
     async fn update_rejects_auth_override_on_enforce() {
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Root upstream with auth enforce.
@@ -2927,7 +2945,8 @@ mod tests {
     async fn update_alias_to_ancestor_requires_bind() {
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Root upstream with inherit sharing (IP-based for explicit alias control).
@@ -2966,7 +2985,8 @@ mod tests {
     async fn update_alias_only_validates_existing_overrides_against_ancestor_enforce() {
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Root upstream with auth enforce (IP-based for explicit alias control).
@@ -3017,7 +3037,8 @@ mod tests {
     async fn update_no_ancestor_match_succeeds() {
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Child creates upstream (IP-based for explicit alias).
@@ -3054,7 +3075,8 @@ mod tests {
 
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Root creates upstream with auth inherit (hostname-based, derived alias).
@@ -3111,7 +3133,8 @@ mod tests {
 
         let root = Uuid::new_v4();
         let child = Uuid::new_v4();
-        let resolver = MockTenantResolverClient::with_hierarchy(vec![root, child]);
+        let resolver =
+            MockTenantResolverClient::with_hierarchy(vec![TenantId(root), TenantId(child)]);
         let svc = make_service_with_resolver(resolver);
 
         // Root creates upstream with auth inherit (hostname-based, derived alias).
