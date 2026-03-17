@@ -423,7 +423,7 @@ sha2 = "0.10"
 hex = "0.4"
 
 # JWT and authentication
-jsonwebtoken = { version = "10.2", features = ["rust_crypto"] }
+jsonwebtoken = { version = "10.3", default-features = false, features = ["aws_lc_rs", "use_pem"] }
 
 # Configuration management
 figment = { version = "0.10", features = ["yaml", "env"] }
@@ -451,7 +451,7 @@ psl = "2"
 
 # Text processing
 base64 = "0.22"
-postcard = { version = "1.1", features = ["alloc"] }
+postcard = { version = "1.1.3", default-features = false, features = ["alloc"] }
 strsim = "0.11"
 
 # OData parsing
