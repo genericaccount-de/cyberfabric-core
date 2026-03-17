@@ -211,6 +211,7 @@ impl<
         let start = std::time::Instant::now();
 
         let turn_repo = Arc::clone(&self.turn_repo);
+        let message_repo = Arc::clone(&self.message_repo);
         let chat_repo = Arc::clone(&self.chat_repo);
         let scope_tx = chat_scope.clone();
         let ctx_clone = ctx.clone();
@@ -233,6 +234,10 @@ impl<
 
                     turn_repo
                         .soft_delete(tx, &scope, target.id, None)
+                        .await
+                        .map_err(|e| modkit_db::DbError::Other(anyhow::Error::new(e)))?;
+                    message_repo
+                        .soft_delete_by_request_id(tx, &scope, chat_id, request_id)
                         .await
                         .map_err(|e| modkit_db::DbError::Other(anyhow::Error::new(e)))?;
 
@@ -355,9 +360,13 @@ impl<
 
                     let user_content = override_content.unwrap_or(original_msg.content);
 
-                    // Soft-delete old turn with replacement link
+                    // Soft-delete old turn and its messages
                     turn_repo
                         .soft_delete(tx, &scope, target.id, Some(new_request_id))
+                        .await
+                        .map_err(|e| modkit_db::DbError::Other(anyhow::Error::new(e)))?;
+                    message_repo
+                        .soft_delete_by_request_id(tx, &scope, chat_id, request_id)
                         .await
                         .map_err(|e| modkit_db::DbError::Other(anyhow::Error::new(e)))?;
 

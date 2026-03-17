@@ -143,6 +143,19 @@ pub trait MessageRepository: Send + Sync {
         boundary: Option<SnapshotBoundary>,
     ) -> Result<Vec<MessageModel>, DomainError>;
 
+    /// Soft-delete all messages belonging to a turn identified by `(chat_id, request_id)`.
+    ///
+    /// Sets `deleted_at = now()` on every message where `chat_id` and `request_id` match
+    /// and `deleted_at IS NULL`. Used during retry, edit, and delete mutations to ensure
+    /// old messages disappear from active conversation history.
+    async fn soft_delete_by_request_id<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        chat_id: Uuid,
+        request_id: Uuid,
+    ) -> Result<u64, DomainError>;
+
     /// Fetch recent messages after a thread summary boundary for context assembly.
     ///
     /// Same as [`recent_for_context`] but only returns messages with

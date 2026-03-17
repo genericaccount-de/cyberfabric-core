@@ -3,7 +3,7 @@ use std::sync::Arc;
 use modkit_security::AccessScope;
 use uuid::Uuid;
 
-use crate::domain::repos::{ChatRepository, TurnRepository};
+use crate::domain::repos::{ChatRepository, MessageRepository, TurnRepository};
 use crate::domain::service::TurnService;
 use crate::domain::service::test_helpers::TestMetrics;
 use crate::domain::service::test_helpers::*;
@@ -453,6 +453,53 @@ async fn delete_already_deleted_turn_returns_not_latest() {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// 7.1b: delete soft-deletes messages alongside turn
+// ════════════════════════════════════════════════════════════════════════════
+
+#[tokio::test]
+async fn delete_soft_deletes_messages_alongside_turn() {
+    let (svc, ctx, chat_id, tenant_id) = setup().await;
+
+    let request_id = create_completed_turn(
+        &svc.db,
+        &*svc.turn_repo,
+        &*svc.message_repo,
+        tenant_id,
+        chat_id,
+        ctx.subject_id(),
+    )
+    .await;
+
+    // Before delete: messages are visible
+    let scope = AccessScope::for_tenant(tenant_id);
+    let conn = svc.db.conn().unwrap();
+    let msgs_before = svc
+        .message_repo
+        .find_by_chat_and_request_id(&conn, &scope, chat_id, request_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        msgs_before.len(),
+        2,
+        "user + assistant messages should exist"
+    );
+
+    svc.delete(&ctx, chat_id, request_id).await.unwrap();
+
+    // After delete: messages are hidden (find_by_chat_and_request_id filters deleted_at IS NULL)
+    let msgs_after = svc
+        .message_repo
+        .find_by_chat_and_request_id(&conn, &scope, chat_id, request_id)
+        .await
+        .unwrap();
+    assert!(
+        msgs_after.is_empty(),
+        "messages should be soft-deleted after turn delete, got {} messages",
+        msgs_after.len()
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // 7.2: TurnService::retry
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -496,6 +543,50 @@ async fn retry_success_returns_new_request_id_and_content() {
     assert_eq!(new_turn.state, TurnState::Running);
 }
 
+#[tokio::test]
+async fn retry_soft_deletes_old_messages_and_creates_new_user_message() {
+    let (svc, ctx, chat_id, tenant_id) = setup().await;
+
+    let request_id = create_completed_turn(
+        &svc.db,
+        &*svc.turn_repo,
+        &*svc.message_repo,
+        tenant_id,
+        chat_id,
+        ctx.subject_id(),
+    )
+    .await;
+
+    let result = svc.retry(&ctx, chat_id, request_id).await.unwrap();
+
+    let scope = AccessScope::for_tenant(tenant_id);
+    let conn = svc.db.conn().unwrap();
+
+    // Old messages should be soft-deleted
+    let old_msgs = svc
+        .message_repo
+        .find_by_chat_and_request_id(&conn, &scope, chat_id, request_id)
+        .await
+        .unwrap();
+    assert!(
+        old_msgs.is_empty(),
+        "old turn messages should be soft-deleted after retry"
+    );
+
+    // New user message should exist under the new request_id
+    let new_msgs = svc
+        .message_repo
+        .find_by_chat_and_request_id(&conn, &scope, chat_id, result.new_request_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        new_msgs.len(),
+        1,
+        "retry should create exactly one new user message"
+    );
+    assert_eq!(new_msgs[0].content, "Hello world");
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // 7.3: TurnService::edit
 // ════════════════════════════════════════════════════════════════════════════
@@ -532,6 +623,53 @@ async fn edit_success_returns_updated_content() {
         .unwrap();
     assert!(old_turn.deleted_at.is_some());
     assert_eq!(old_turn.replaced_by_request_id, Some(result.new_request_id));
+}
+
+#[tokio::test]
+async fn edit_soft_deletes_old_messages_and_creates_new_user_message() {
+    let (svc, ctx, chat_id, tenant_id) = setup().await;
+
+    let request_id = create_completed_turn(
+        &svc.db,
+        &*svc.turn_repo,
+        &*svc.message_repo,
+        tenant_id,
+        chat_id,
+        ctx.subject_id(),
+    )
+    .await;
+
+    let result = svc
+        .edit(&ctx, chat_id, request_id, "Edited content".to_owned())
+        .await
+        .unwrap();
+
+    let scope = AccessScope::for_tenant(tenant_id);
+    let conn = svc.db.conn().unwrap();
+
+    // Old messages should be soft-deleted
+    let old_msgs = svc
+        .message_repo
+        .find_by_chat_and_request_id(&conn, &scope, chat_id, request_id)
+        .await
+        .unwrap();
+    assert!(
+        old_msgs.is_empty(),
+        "old turn messages should be soft-deleted after edit"
+    );
+
+    // New user message should exist with edited content
+    let new_msgs = svc
+        .message_repo
+        .find_by_chat_and_request_id(&conn, &scope, chat_id, result.new_request_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        new_msgs.len(),
+        1,
+        "edit should create exactly one new user message"
+    );
+    assert_eq!(new_msgs[0].content, "Edited content");
 }
 
 #[tokio::test]

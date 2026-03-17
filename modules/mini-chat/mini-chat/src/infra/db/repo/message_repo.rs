@@ -4,9 +4,10 @@ use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use modkit_db::odata::{LimitCfg, paginate_odata};
-use modkit_db::secure::{DBRunner, SecureEntityExt, secure_insert};
+use modkit_db::secure::{DBRunner, SecureEntityExt, SecureUpdateExt, secure_insert};
 use modkit_odata::{ODataQuery, Page, SortDir};
 use modkit_security::AccessScope;
+use sea_orm::prelude::Expr;
 use sea_orm::{
     ColumnTrait, Condition, EntityTrait, FromQueryResult, JoinType, Order, QueryFilter, QueryOrder,
     QuerySelect, RelationTrait, Set,
@@ -273,6 +274,29 @@ impl crate::domain::repos::MessageRepository for MessageRepository {
         }
         Ok(map)
     }
+    async fn soft_delete_by_request_id<C: DBRunner>(
+        &self,
+        runner: &C,
+        scope: &AccessScope,
+        chat_id: Uuid,
+        request_id: Uuid,
+    ) -> Result<u64, DomainError> {
+        let now = OffsetDateTime::now_utc();
+        let result = MessageEntity::update_many()
+            .col_expr(Column::DeletedAt, Expr::value(Some(now)))
+            .filter(
+                Condition::all()
+                    .add(Column::ChatId.eq(chat_id))
+                    .add(Column::RequestId.eq(request_id))
+                    .add(Column::DeletedAt.is_null()),
+            )
+            .secure()
+            .scope_with(scope)
+            .exec(runner)
+            .await?;
+        Ok(result.rows_affected)
+    }
+
     async fn snapshot_boundary<C: DBRunner>(
         &self,
         runner: &C,

@@ -206,6 +206,16 @@ mod tests {
             unimplemented!()
         }
 
+        async fn soft_delete_by_request_id<C: DBRunner>(
+            &self,
+            _: &C,
+            _: &AccessScope,
+            _: Uuid,
+            _: Uuid,
+        ) -> Result<u64, DomainError> {
+            unimplemented!()
+        }
+
         async fn snapshot_boundary<C: DBRunner>(
             &self,
             _: &C,
