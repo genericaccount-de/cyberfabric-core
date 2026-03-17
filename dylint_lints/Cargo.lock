@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit"
-version = "0.5.5"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-db"
-version = "0.5.5"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-db-macros"
-version = "0.5.5"
+version = "0.5.7"
 dependencies = [
  "heck 0.5.0",
  "proc-macro-error2",
@@ -605,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-errors"
-version = "0.5.5"
+version = "0.5.7"
 dependencies = [
  "axum 0.8.8",
  "http",
@@ -616,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-errors-macro"
-version = "0.5.5"
+version = "0.5.7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -627,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-macros"
-version = "0.5.5"
+version = "0.5.7"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -638,16 +638,17 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-odata"
-version = "0.5.5"
+version = "0.5.7"
 dependencies = [
  "base64",
  "bigdecimal",
  "cf-modkit-errors",
  "cf-modkit-errors-macro",
  "chrono",
+ "chrono-tz",
  "hex",
  "http",
- "odata-params",
+ "peg",
  "serde",
  "serde_json",
  "sha2",
@@ -657,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-sdk"
-version = "0.5.5"
+version = "0.5.7"
 dependencies = [
  "cf-modkit-odata",
  "cf-modkit-security",
@@ -667,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-security"
-version = "0.5.5"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "postcard",
@@ -679,7 +680,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-utils"
-version = "0.5.5"
+version = "0.5.7"
 dependencies = [
  "humantime",
  "regex",
@@ -690,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "cf-system-sdk-directory"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -698,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "cf-system-sdks"
-version = "0.1.25"
+version = "0.1.26"
 dependencies = [
  "cf-system-sdk-directory",
 ]
@@ -722,10 +723,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fac4744fb15ae8337dc853fee7fb3f4e48c0fbaa23d0afe49c447b4fab126118"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -2723,20 +2722,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
 dependencies = [
  "libc",
-]
-
-[[package]]
-name = "odata-params"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d32ae3978a6fc4114aec5b7907038efa81452336845a98a1e2ec957c8f32ade6"
-dependencies = [
- "bigdecimal",
- "chrono",
- "chrono-tz",
- "peg",
- "thiserror 1.0.69",
- "uuid",
 ]
 
 [[package]]
