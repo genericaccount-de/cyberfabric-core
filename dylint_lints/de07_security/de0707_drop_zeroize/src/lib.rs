@@ -14,6 +14,15 @@ use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty::{Ty, TypeckResults};
 use rustc_span::symbol::Symbol;
 
+/// Pre-interned symbols used in `is_ptr_write_bytes`. Initialized once at first call
+/// rather than re-interning on every lint invocation.
+static SYM_CORE: std::sync::LazyLock<Symbol> =
+    std::sync::LazyLock::new(|| Symbol::intern("core"));
+static SYM_STD: std::sync::LazyLock<Symbol> =
+    std::sync::LazyLock::new(|| Symbol::intern("std"));
+static SYM_WRITE_BYTES: std::sync::LazyLock<Symbol> =
+    std::sync::LazyLock::new(|| Symbol::intern("write_bytes"));
+
 dylint_linting::declare_late_lint! {
     /// ### What it does
     ///
@@ -54,6 +63,28 @@ dylint_linting::declare_late_lint! {
     ///     }
     /// }
     /// ```
+    ///
+    /// ### Limitations
+    ///
+    /// This lint only inspects the immediate body of `Drop::drop` and does **not**
+    /// perform interprocedural analysis. Zeroing delegated to a helper function will
+    /// not be detected:
+    ///
+    /// ```rust,ignore
+    /// fn secure_erase(buf: &mut Vec<u8>) {
+    ///     buf.fill(0); // not flagged — outside Drop::drop
+    /// }
+    ///
+    /// impl Drop for SecretKey {
+    ///     fn drop(&mut self) {
+    ///         secure_erase(&mut self.data); // not flagged — indirect call
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// The helper call itself escapes the lint, but the underlying zeroing is still
+    /// at risk: LLVM may inline `secure_erase` and then eliminate the dead store.
+    /// Use `zeroize` or `secrecy` in all cases to ensure the compiler fence is in place.
     pub DE0707_DROP_ZEROIZE,
     Deny,
     "manual byte-zeroing in Drop may be optimized away; use `secrecy::SecretBox` or the `zeroize` crate (DE0707)"
@@ -106,10 +137,10 @@ fn has_u8_element(ty: Ty<'_>) -> bool {
 /// user-defined `write_bytes` helpers.
 fn is_ptr_write_bytes(cx: &LateContext<'_>, def_id: DefId) -> bool {
     let krate = cx.tcx.crate_name(def_id.krate);
-    if krate != Symbol::intern("core") && krate != Symbol::intern("std") {
+    if krate != *SYM_CORE && krate != *SYM_STD {
         return false;
     }
-    cx.tcx.item_name(def_id) == Symbol::intern("write_bytes")
+    cx.tcx.item_name(def_id) == *SYM_WRITE_BYTES
 }
 
 struct ZeroingVisitor<'tcx, 'cx> {
@@ -196,7 +227,7 @@ impl<'tcx> hir::intravisit::Visitor<'tcx> for ZeroingVisitor<'tcx, '_> {
                                                     "manual byte-zeroing in `Drop::drop` may be eliminated by the optimizer (DE0707)",
                                                 );
                                                 diag.help(
-                                                    "use `secrecy::SecretBox` (project standard for secrets) or `zeroize`: `.zeroize()` / `#[derive(ZeroizeOnDrop)]`",
+                                                    "use `secrecy::SecretBox` or `zeroize`: `.zeroize()` / `#[derive(ZeroizeOnDrop)]`",
                                                 );
                                                 diag.note(
                                                     "LLVM dead-store elimination can legally remove writes that are never read; `zeroize` uses a compiler fence to prevent this",

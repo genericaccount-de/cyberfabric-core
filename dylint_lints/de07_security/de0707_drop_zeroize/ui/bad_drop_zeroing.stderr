@@ -23,7 +23,7 @@ error: manual byte-zeroing in `Drop::drop` may be eliminated by the optimizer (D
 LL |             std::ptr::write_bytes(self.data, 0, self.len);
    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
-   = help: use `secrecy::SecretBox` (project standard for secrets) or `zeroize`: `.zeroize()` / `#[derive(ZeroizeOnDrop)]`
+   = help: use `secrecy::SecretBox` or `zeroize`: `.zeroize()` / `#[derive(ZeroizeOnDrop)]`
    = note: LLVM dead-store elimination can legally remove writes that are never read; `zeroize` uses a compiler fence to prevent this
 
 error: aborting due to 3 previous errors

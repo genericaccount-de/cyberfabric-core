@@ -1,4 +1,5 @@
 // Created: 2026-03-13 by Constructor Tech
+// Updated: 2026-03-17 by Constructor Tech
 #![feature(rustc_private)]
 #![warn(unused_extern_crates)]
 
@@ -69,10 +70,21 @@ impl EarlyLintPass for De1303NoPrimitiveTypeAlias {
         }
 
         // RHS must be a bare path whose last segment is a primitive-like backing type.
-        // Covers UUID types, String, and common integer types. Qualified paths like
-        // `uuid::Uuid` work because we only inspect the last path segment.
+        // Covers UUID types, String, and all built-in primitive types. Qualified paths
+        // like `uuid::Uuid` work because we only inspect the last path segment.
         const PRIMITIVE_BACKING_TYPES: &[&str] = &[
-            "Uuid", "Ulid", "String", "i64", "u64", "i32", "u32", "u16", "u128",
+            // UUID / identifier types
+            "Uuid", "Ulid",
+            // String
+            "String",
+            // Unsigned integers
+            "u8", "u16", "u32", "u64", "u128", "usize",
+            // Signed integers
+            "i8", "i16", "i32", "i64", "i128", "isize",
+            // Floating point
+            "f32", "f64",
+            // Other primitives
+            "bool", "char",
         ];
 
         let Some(ty) = &ty_alias.ty else {
