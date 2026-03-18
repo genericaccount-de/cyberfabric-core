@@ -1,7 +1,7 @@
 [workspace]
 # Keep the defaults simple and explicit. We rely on Cargo manifests for:
 # - which crates are publishable (`publish = false` disables)
-# - per-crate versioning (explicit `version = ...` for modules/sdks, and `version.workspace = true` for ModKit libs)
+# - per-crate versioning (every crate has its own explicit `version = ...`)
 #
 # NOTE: release-plz may temporarily checkout commits while computing diffs.
 # Some repos can end up "dirty" due to generated/normalized files, so we allow it.
