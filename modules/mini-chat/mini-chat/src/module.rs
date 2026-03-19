@@ -19,7 +19,9 @@ use crate::config::ProviderEntry;
 use crate::domain::ports::MiniChatMetricsPort;
 use crate::domain::service::{AppServices as GenericAppServices, Repositories};
 use crate::infra::metrics::MiniChatMetricsMeter;
-use crate::infra::outbox::{AttachmentCleanupHandler, InfraOutboxEnqueuer, UsageEventHandler};
+use crate::infra::outbox::{
+    AttachmentCleanupHandler, AuditEventHandler, InfraOutboxEnqueuer, UsageEventHandler,
+};
 
 pub(crate) type AppServices = GenericAppServices<
     TurnRepository,
@@ -32,6 +34,7 @@ pub(crate) type AppServices = GenericAppServices<
     VectorStoreRepository,
     MessageAttachmentRepository,
 >;
+use crate::infra::audit_gateway::AuditGateway;
 use crate::infra::db::repo::attachment_repo::AttachmentRepository;
 use crate::infra::db::repo::chat_repo::ChatRepository;
 use crate::infra::db::repo::message_attachment_repo::MessageAttachmentRepository;
@@ -147,9 +150,12 @@ impl Module for MiniChatModule {
         // Create the model-policy gateway early for both outbox handler and services.
         let model_policy_gw = Arc::new(ModelPolicyGateway::new(
             ctx.client_hub(),
-            vendor,
+            vendor.clone(),
             ctx.cancellation_token().clone(),
         ));
+
+        // Audit gateway: lazily resolves audit plugin(s) on first emission.
+        let audit_gateway = Arc::new(AuditGateway::new(ctx.client_hub(), vendor));
 
         // Start the outbox pipeline eagerly in init() (migrations ran in phase 2, DB is ready).
         // The framework guarantees stop() is called on init failure, so the pipeline
@@ -160,11 +166,21 @@ impl Module for MiniChatModule {
         let num_partitions = cfg.outbox.num_partitions;
         let queue_name = cfg.outbox.queue_name.clone();
         let cleanup_queue_name = cfg.outbox.cleanup_queue_name.clone();
+        let audit_queue_name = cfg.outbox.audit_queue_name.clone();
 
         let partitions = Partitions::of(
             u16::try_from(num_partitions)
                 .map_err(|_| anyhow::anyhow!("num_partitions {num_partitions} exceeds u16"))?,
         );
+
+        // Metrics are created here (before the outbox) so they can be passed to AuditEventHandler.
+        let metrics_prefix = cfg.metrics.effective_prefix(Self::MODULE_NAME);
+        let scope =
+            opentelemetry::InstrumentationScope::builder(Self::MODULE_NAME.to_owned()).build();
+        let metrics: Arc<dyn MiniChatMetricsPort> = Arc::new(MiniChatMetricsMeter::new(
+            &opentelemetry::global::meter_with_scope(scope),
+            &metrics_prefix,
+        ));
 
         let outbox_handle = Outbox::builder(outbox_db)
             .queue(&queue_name, partitions)
@@ -173,6 +189,11 @@ impl Module for MiniChatModule {
             })
             .queue(&cleanup_queue_name, partitions)
             .decoupled(AttachmentCleanupHandler)
+            .queue(&audit_queue_name, partitions)
+            .decoupled(AuditEventHandler {
+                audit_gateway: Arc::clone(&audit_gateway),
+                metrics: Arc::clone(&metrics),
+            })
             .start()
             .await
             .map_err(|e| anyhow::anyhow!("outbox start: {e}"))?;
@@ -182,6 +203,7 @@ impl Module for MiniChatModule {
             outbox,
             queue_name,
             cleanup_queue_name,
+            audit_queue_name,
             num_partitions,
         ));
 
@@ -334,14 +356,6 @@ impl Module for MiniChatModule {
             ),
         );
 
-        // Create metrics adapter
-        let metrics_prefix = cfg.metrics.effective_prefix(Self::MODULE_NAME);
-        let scope =
-            opentelemetry::InstrumentationScope::builder(Self::MODULE_NAME.to_owned()).build();
-        let metrics: Arc<dyn MiniChatMetricsPort> = Arc::new(MiniChatMetricsMeter::new(
-            &opentelemetry::global::meter_with_scope(scope),
-            &metrics_prefix,
-        ));
         let services = Arc::new(AppServices::new(
             &repos,
             db,
@@ -353,7 +367,7 @@ impl Module for MiniChatModule {
             model_policy_gw as Arc<dyn crate::domain::repos::UserLimitsProvider>,
             cfg.estimation_budgets,
             cfg.quota,
-            &(Arc::clone(&outbox_enqueuer) as Arc<dyn crate::domain::repos::OutboxEnqueuer>),
+            &(outbox_enqueuer as Arc<dyn crate::domain::repos::OutboxEnqueuer>),
             cfg.context,
             file_storage,
             vector_store_prov,

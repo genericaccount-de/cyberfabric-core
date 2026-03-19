@@ -537,7 +537,7 @@ impl QuotaConfig {
     }
 }
 
-/// Outbox configuration for usage event publishing.
+/// Outbox configuration for usage and audit event publishing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutboxConfig {
@@ -548,6 +548,9 @@ pub struct OutboxConfig {
     /// Queue name for attachment cleanup events.
     #[serde(default = "default_outbox_cleanup_queue_name")]
     pub cleanup_queue_name: String,
+    /// Queue name for audit events.
+    #[serde(default = "default_audit_queue_name")]
+    pub audit_queue_name: String,
 
     /// Number of outbox partitions. Must be 1–64.
     #[serde(default = "default_outbox_num_partitions")]
@@ -559,6 +562,7 @@ impl Default for OutboxConfig {
         Self {
             queue_name: default_outbox_queue_name(),
             cleanup_queue_name: default_outbox_cleanup_queue_name(),
+            audit_queue_name: default_audit_queue_name(),
             num_partitions: default_outbox_num_partitions(),
         }
     }
@@ -571,6 +575,9 @@ impl OutboxConfig {
         }
         if self.cleanup_queue_name.trim().is_empty() {
             return Err("outbox cleanup_queue_name must not be empty".to_owned());
+        }
+        if self.audit_queue_name.trim().is_empty() {
+            return Err("outbox audit_queue_name must not be empty".to_owned());
         }
         if !(1..=64).contains(&self.num_partitions) || !self.num_partitions.is_power_of_two() {
             return Err(format!(
@@ -588,6 +595,10 @@ fn default_outbox_queue_name() -> String {
 
 fn default_outbox_cleanup_queue_name() -> String {
     "mini-chat.attachment_cleanup".to_owned()
+}
+
+fn default_audit_queue_name() -> String {
+    "mini-chat.audit".to_owned()
 }
 
 fn default_outbox_num_partitions() -> u32 {

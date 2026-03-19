@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use super::current_otel_trace_id;
 use authz_resolver_sdk::{EnforcerError, PolicyEnforcer};
 use modkit_macros::domain_model;
 use modkit_security::{AccessScope, SecurityContext};
@@ -8,10 +9,15 @@ use uuid::Uuid;
 
 use crate::domain::ports::MiniChatMetricsPort;
 use crate::domain::ports::metric_labels::{op, result as result_label};
+use mini_chat_sdk::{
+    RequesterType, TurnDeleteAuditEvent, TurnDeleteAuditEventType, TurnMutationAuditEvent,
+};
+
 use crate::domain::repos::{
     ChatRepository, CreateTurnParams, InsertUserMessageParams, MessageAttachmentRepository,
-    MessageRepository, TurnRepository,
+    MessageRepository, OutboxEnqueuer, TurnRepository,
 };
+use crate::domain::service::AuditEnvelope;
 use crate::infra::db::entity::chat_turn::{Model as TurnModel, TurnState};
 
 use super::{DbProvider, actions, resources};
@@ -124,6 +130,7 @@ pub struct TurnService<
     chat_repo: Arc<CR>,
     message_attachment_repo: Arc<MAR>,
     enforcer: PolicyEnforcer,
+    outbox_enqueuer: Arc<dyn OutboxEnqueuer>,
     metrics: Arc<dyn MiniChatMetricsPort>,
 }
 
@@ -134,6 +141,7 @@ impl<
     MAR: MessageAttachmentRepository + 'static,
 > TurnService<TR, MR, CR, MAR>
 {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         db: Arc<DbProvider>,
         turn_repo: Arc<TR>,
@@ -141,6 +149,7 @@ impl<
         chat_repo: Arc<CR>,
         message_attachment_repo: Arc<MAR>,
         enforcer: PolicyEnforcer,
+        outbox_enqueuer: Arc<dyn OutboxEnqueuer>,
         metrics: Arc<dyn MiniChatMetricsPort>,
     ) -> Self {
         Self {
@@ -150,6 +159,7 @@ impl<
             chat_repo,
             message_attachment_repo,
             enforcer,
+            outbox_enqueuer,
             metrics,
         }
     }
@@ -212,10 +222,14 @@ impl<
             .ensure_owner(ctx.subject_id());
 
         let start = std::time::Instant::now();
+        // Capture trace_id before the transaction; the closure runs in a different
+        // async context and does not inherit the parent span.
+        let trace_id = current_otel_trace_id();
 
         let turn_repo = Arc::clone(&self.turn_repo);
         let message_repo = Arc::clone(&self.message_repo);
         let chat_repo = Arc::clone(&self.chat_repo);
+        let outbox_enqueuer = Arc::clone(&self.outbox_enqueuer);
         let scope_tx = chat_scope.clone();
         let ctx_clone = ctx.clone();
 
@@ -244,6 +258,23 @@ impl<
                         .await
                         .map_err(|e| modkit_db::DbError::Other(anyhow::Error::new(e)))?;
 
+                    // Enqueue audit event atomically within the same transaction.
+                    let audit_event = AuditEnvelope::Delete(TurnDeleteAuditEvent {
+                        event_type: TurnDeleteAuditEventType::default(),
+                        timestamp: time::OffsetDateTime::now_utc(),
+                        tenant_id: ctx_clone.subject_tenant_id(),
+                        requester_type: requester_type_from_subject(&ctx_clone),
+                        trace_id,
+                        actor_user_id: ctx_clone.subject_id(),
+                        chat_id,
+                        turn_id: target.id,
+                        request_id,
+                    });
+                    outbox_enqueuer
+                        .enqueue_audit_event(tx, audit_event)
+                        .await
+                        .map_err(|e| modkit_db::DbError::Other(anyhow::Error::new(e)))?;
+
                     Ok(())
                 })
             })
@@ -254,7 +285,12 @@ impl<
         self.metrics
             .record_turn_mutation(op::DELETE, mutation_result_label(&result));
         self.metrics.record_turn_mutation_latency_ms(op::DELETE, ms);
-        result
+        result?;
+
+        // Post-commit side effects (outside transaction).
+        self.outbox_enqueuer.flush();
+
+        Ok(())
     }
 
     // ── Retry ───────────────────────────────────────────────────────────
@@ -274,15 +310,22 @@ impl<
             .ensure_owner(ctx.subject_id());
 
         let start = std::time::Instant::now();
+        // Capture trace_id before the transaction closure.
+        let trace_id = current_otel_trace_id();
         let result = self
-            .mutate_for_stream(ctx, chat_scope, chat_id, request_id, None)
+            .mutate_for_stream(ctx, chat_scope, chat_id, request_id, None, trace_id)
             .await;
 
         let ms = start.elapsed().as_secs_f64() * 1000.0;
         self.metrics
             .record_turn_mutation(op::RETRY, mutation_result_label(&result));
         self.metrics.record_turn_mutation_latency_ms(op::RETRY, ms);
-        result
+        let result = result?;
+
+        // Post-commit side effects (outside transaction).
+        self.outbox_enqueuer.flush();
+
+        Ok(result)
     }
 
     // ── Edit ────────────────────────────────────────────────────────────
@@ -303,15 +346,29 @@ impl<
             .ensure_owner(ctx.subject_id());
 
         let start = std::time::Instant::now();
+        // Capture trace_id before the transaction closure.
+        let trace_id = current_otel_trace_id();
         let result = self
-            .mutate_for_stream(ctx, chat_scope, chat_id, request_id, Some(new_content))
+            .mutate_for_stream(
+                ctx,
+                chat_scope,
+                chat_id,
+                request_id,
+                Some(new_content),
+                trace_id,
+            )
             .await;
 
         let ms = start.elapsed().as_secs_f64() * 1000.0;
         self.metrics
             .record_turn_mutation(op::EDIT, mutation_result_label(&result));
         self.metrics.record_turn_mutation_latency_ms(op::EDIT, ms);
-        result
+        let result = result?;
+
+        // Post-commit side effects (outside transaction).
+        self.outbox_enqueuer.flush();
+
+        Ok(result)
     }
 
     // ── Shared retry/edit transaction ────────────────────────────────────
@@ -323,6 +380,7 @@ impl<
         chat_id: Uuid,
         request_id: Uuid,
         override_content: Option<String>,
+        trace_id: Option<String>,
     ) -> Result<MutationResult, MutationError> {
         let new_request_id = Uuid::new_v4();
         let new_turn_id = Uuid::new_v4();
@@ -331,6 +389,7 @@ impl<
         let message_repo = Arc::clone(&self.message_repo);
         let chat_repo = Arc::clone(&self.chat_repo);
         let message_attachment_repo = Arc::clone(&self.message_attachment_repo);
+        let outbox_enqueuer = Arc::clone(&self.outbox_enqueuer);
         let scope_tx = chat_scope.clone();
         let ctx_clone = ctx.clone();
 
@@ -361,6 +420,8 @@ impl<
                             ))
                         })?;
 
+                    // Determine event type before consuming override_content.
+                    let is_edit = override_content.is_some();
                     let user_content = override_content.unwrap_or(original_msg.content);
 
                     // Soft-delete old turn and its messages
@@ -433,6 +494,38 @@ impl<
                     // excluding soft-deleted attachments (P3-8).
                     message_attachment_repo
                         .copy_for_retry(tx, &scope, original_msg.id, new_msg_id, chat_id)
+                        .await
+                        .map_err(|e| modkit_db::DbError::Other(anyhow::Error::new(e)))?;
+
+                    // Enqueue audit event atomically within the same transaction.
+                    let requester_type = requester_type_from_subject(&ctx_clone);
+                    let audit_event = AuditEnvelope::Mutation(if is_edit {
+                        TurnMutationAuditEvent::new_edit(
+                            time::OffsetDateTime::now_utc(),
+                            tenant_id,
+                            requester_type,
+                            trace_id,
+                            ctx_clone.subject_id(),
+                            chat_id,
+                            target.id,
+                            request_id,
+                            new_request_id,
+                        )
+                    } else {
+                        TurnMutationAuditEvent::new_retry(
+                            time::OffsetDateTime::now_utc(),
+                            tenant_id,
+                            requester_type,
+                            trace_id,
+                            ctx_clone.subject_id(),
+                            chat_id,
+                            target.id,
+                            request_id,
+                            new_request_id,
+                        )
+                    });
+                    outbox_enqueuer
+                        .enqueue_audit_event(tx, audit_event)
                         .await
                         .map_err(|e| modkit_db::DbError::Other(anyhow::Error::new(e)))?;
 
@@ -530,6 +623,13 @@ fn mutation_result_label<T>(result: &Result<T, MutationError>) -> &'static str {
         Err(MutationError::Forbidden) => result_label::FORBIDDEN,
         Err(MutationError::GenerationInProgress) => result_label::GENERATION_IN_PROGRESS,
         Err(_) => result_label::ERROR,
+    }
+}
+
+fn requester_type_from_subject(ctx: &SecurityContext) -> RequesterType {
+    match ctx.subject_type() {
+        Some("system") => RequesterType::System,
+        _ => RequesterType::User,
     }
 }
 

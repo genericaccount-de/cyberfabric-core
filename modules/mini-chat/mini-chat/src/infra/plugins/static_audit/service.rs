@@ -1,11 +1,20 @@
 use async_trait::async_trait;
+use modkit_macros::domain_model;
+use tracing::info;
+
 use mini_chat_sdk::{
     MiniChatAuditPluginClientV1, MiniChatAuditPluginError, TurnAuditEvent, TurnDeleteAuditEvent,
     TurnEditAuditEvent, TurnRetryAuditEvent,
 };
-use tracing::info;
 
-use super::service::Service;
+/// Service for the static audit plugin.
+///
+/// When `enabled` is `false`, all emit methods return `Ok(())` immediately
+/// without writing to the log.
+#[domain_model]
+pub struct Service {
+    pub enabled: bool,
+}
 
 #[async_trait]
 impl MiniChatAuditPluginClientV1 for Service {

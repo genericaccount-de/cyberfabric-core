@@ -9,6 +9,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, warn};
 use uuid::Uuid;
 
+use mini_chat_sdk::RequesterType;
+
 use crate::config::{ContextConfig, StreamingConfig};
 use crate::domain::error::DomainError;
 use crate::domain::llm::{ToolPhase, Usage};
@@ -175,6 +177,7 @@ struct FinalizationCtx<TR: TurnRepository + 'static, MR: MessageRepository + 'st
     chat_id: Uuid,
     request_id: Uuid,
     user_id: Uuid,
+    requester_type: RequesterType,
     /// Pre-generated assistant message ID, sent in `StreamStartedData` (`stream_started` event).
     message_id: Uuid,
     // ── Quota/preflight fields (from PreflightDecision) ──
@@ -212,6 +215,8 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
         error_detail: Option<String>,
         provider_response_id: Option<String>,
         web_search_calls: u32,
+        ttft_ms: Option<u64>,
+        total_ms: Option<u64>,
     ) -> crate::domain::model::finalization::FinalizationInput {
         crate::domain::model::finalization::FinalizationInput {
             turn_id: self.turn_id,
@@ -219,6 +224,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
             chat_id: self.chat_id,
             request_id: self.request_id,
             user_id: self.user_id,
+            requester_type: self.requester_type,
             scope: self.scope.clone(),
             message_id: self.message_id,
             terminal_state,
@@ -239,6 +245,8 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
             downgrade_reason: self.downgrade_reason.clone(),
             period_starts: self.period_starts.clone(),
             web_search_calls,
+            ttft_ms,
+            total_ms,
         }
     }
 }
@@ -246,6 +254,14 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
 // ════════════════════════════════════════════════════════════════════════════
 // Error normalization
 // ════════════════════════════════════════════════════════════════════════════
+
+/// Map an optional subject-type string from [`SecurityContext`] to [`RequesterType`].
+fn requester_type_from_str(s: Option<&str>) -> RequesterType {
+    match s {
+        Some("system") => RequesterType::System,
+        _ => RequesterType::User,
+    }
+}
 
 /// Normalize an [`LlmProviderError`] to a `(code, message)` pair for the SSE
 /// error event. Messages are already sanitized by the infra layer.
@@ -727,6 +743,7 @@ impl<
             chat_id,
             request_id,
             user_id,
+            requester_type: requester_type_from_str(ctx.subject_type()),
             message_id,
             effective_model: pf.effective_model.clone(),
             selected_model: selected_model.clone(),
@@ -1309,6 +1326,7 @@ impl<
             chat_id,
             request_id,
             user_id,
+            requester_type: requester_type_from_str(ctx.subject_type()),
             message_id,
             effective_model: pf.effective_model.clone(),
             selected_model: selected_model.clone(),
@@ -1498,6 +1516,8 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                         None,
                         None,
                         0,
+                        None,
+                        None,
                     );
                     match fctx.finalization_svc.finalize_turn_cas(input).await {
                         Ok(outcome) if outcome.won_cas => {
@@ -1627,6 +1647,8 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                                                     None,
                                                     None,
                                                     web_search_completed_count,
+                                                    None,
+                                                    None,
                                                 );
                                                 match fctx.finalization_svc.finalize_turn_cas(input).await {
                                                     Ok(outcome) if outcome.won_cas => {
@@ -1714,6 +1736,7 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
 
                             // Finalize first, emit error only if CAS winner (D3)
                             if let Some(ref fctx) = fin_ctx {
+                                let mid_elapsed = stream_start.elapsed();
                                 let input = fctx.to_finalization_input(
                                     TurnState::Failed,
                                     &accumulated_text,
@@ -1722,6 +1745,8 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                                     None,
                                     None,
                                     web_search_completed_count,
+                                    first_token_time.map(|d| d.as_millis() as u64),
+                                    Some(mid_elapsed.as_millis() as u64),
                                 );
                                 match fctx.finalization_svc.finalize_turn_cas(input).await {
                                     Ok(outcome) if outcome.won_cas => {
@@ -1798,6 +1823,8 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                     None,
                     None,
                     web_search_completed_count,
+                    first_token_time.map(|d| d.as_millis() as u64),
+                    Some(elapsed.as_millis() as u64),
                 );
                 if let Err(e) = fctx.finalization_svc.finalize_turn_cas(input).await {
                     warn!(error = %e, "finalization failed on cancelled stream");
@@ -1851,6 +1878,8 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                         None,
                         Some(response_id.clone()),
                         web_search_completed_count,
+                        first_token_time.map(|d| d.as_millis() as u64),
+                        Some(elapsed.as_millis() as u64),
                     );
                     match fctx.finalization_svc.finalize_turn_cas(input).await {
                         Ok(outcome) if outcome.won_cas => {
@@ -1973,6 +2002,8 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                         None,
                         None,
                         web_search_completed_count,
+                        first_token_time.map(|d| d.as_millis() as u64),
+                        Some(elapsed.as_millis() as u64),
                     );
                     match fctx.finalization_svc.finalize_turn_cas(input).await {
                         Ok(outcome) if outcome.won_cas => {
@@ -2069,6 +2100,8 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                         None,
                         None,
                         web_search_completed_count,
+                        first_token_time.map(|d| d.as_millis() as u64),
+                        Some(elapsed.as_millis() as u64),
                     );
                     match fctx.finalization_svc.finalize_turn_cas(input).await {
                         Ok(outcome) if outcome.won_cas => {
@@ -2173,6 +2206,14 @@ mod tests {
             &self,
             _runner: &(dyn modkit_db::secure::DBRunner + Sync),
             _event: crate::domain::repos::AttachmentCleanupEvent,
+        ) -> Result<(), crate::domain::error::DomainError> {
+            Ok(())
+        }
+
+        async fn enqueue_audit_event(
+            &self,
+            _runner: &(dyn modkit_db::secure::DBRunner + Sync),
+            _event: crate::domain::model::audit_envelope::AuditEnvelope,
         ) -> Result<(), crate::domain::error::DomainError> {
             Ok(())
         }
@@ -3600,6 +3641,7 @@ mod tests {
             chat_id,
             request_id,
             user_id,
+            requester_type: RequesterType::User,
             message_id,
             effective_model: "gpt-4o-mini".to_owned(),
             selected_model: "gpt-4o".to_owned(),

@@ -1,3 +1,4 @@
+use mini_chat_sdk::RequesterType;
 use modkit_macros::domain_model;
 use modkit_security::AccessScope;
 use uuid::Uuid;
@@ -21,6 +22,7 @@ pub struct FinalizationInput {
     pub chat_id: Uuid,
     pub request_id: Uuid,
     pub user_id: Uuid,
+    pub requester_type: RequesterType,
     pub scope: AccessScope,
     pub message_id: Uuid,
 
@@ -49,6 +51,11 @@ pub struct FinalizationInput {
     // ── Web search telemetry ──
     /// Number of completed web search calls during this turn.
     pub web_search_calls: u32,
+
+    /// Time-to-first-token in milliseconds (captured in `stream_service`).
+    pub ttft_ms: Option<u64>,
+    /// Total stream duration in milliseconds (captured in `stream_service`).
+    pub total_ms: Option<u64>,
 }
 
 /// Result of `finalize_turn_cas()`.

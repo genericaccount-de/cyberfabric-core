@@ -30,3 +30,4 @@ gts = { workspace = true }
 gts-macros = { workspace = true }
 modkit = { workspace = true }
 tokio-util = { workspace = true }
+tracing = { workspace = true }

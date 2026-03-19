@@ -1,11 +1,16 @@
 use std::sync::Arc;
 
+use super::current_otel_trace_id;
 use modkit_macros::domain_model;
 use tracing::{debug, error, warn};
 
-use mini_chat_sdk::{UsageEvent, UsageTokens};
+use mini_chat_sdk::{
+    AuditUsageTokens, LatencyMs, PolicyDecisions, QuotaDecision, TurnAuditEvent,
+    TurnAuditEventType, UsageEvent, UsageTokens,
+};
 
 use crate::domain::error::DomainError;
+use crate::domain::model::audit_envelope::AuditEnvelope;
 use crate::domain::model::billing_outcome::{
     BillingDerivation, BillingDerivationInput, BillingOutcome, derive_billing_outcome,
 };
@@ -19,6 +24,7 @@ use crate::domain::repos::{
 };
 use crate::domain::service::quota_settler::QuotaSettler;
 use crate::infra::db::entity::chat_turn::TurnState;
+use crate::infra::llm::Usage;
 
 use crate::domain::ports::MiniChatMetricsPort;
 use crate::domain::ports::metric_labels::{period, result as result_label, trigger};
@@ -83,7 +89,12 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
         input: FinalizationInput,
     ) -> Result<FinalizationOutcome, DomainError> {
         let start = std::time::Instant::now();
-        let result = self.try_finalize(&input).await;
+        // Capture trace_id before the transaction: the transaction closure runs
+        // on the same thread but inside a different async context; capturing here
+        // ensures we get the actual request span ID.
+        let trace_id = current_otel_trace_id();
+
+        let result = self.try_finalize(&input, trace_id.clone()).await;
 
         match result {
             Ok(outcome) => {
@@ -110,15 +121,15 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                     let mut retry_input = input;
                     retry_input.terminal_state = TurnState::Failed;
                     retry_input.error_code = Some("message_persistence_failed".to_owned());
-                    let retry_outcome =
-                        self.try_finalize(&retry_input)
-                            .await
-                            .map_err(|fe| match fe {
-                                FinalizationError::Domain(de) => de,
-                                FinalizationError::MessagePersistenceFailed(e2) => {
-                                    DomainError::internal(format!("unexpected retry failure: {e2}"))
-                                }
-                            })?;
+                    let retry_outcome = self
+                        .try_finalize(&retry_input, trace_id.clone())
+                        .await
+                        .map_err(|fe| match fe {
+                            FinalizationError::Domain(de) => de,
+                            FinalizationError::MessagePersistenceFailed(e2) => {
+                                DomainError::internal(format!("unexpected retry failure: {e2}"))
+                            }
+                        })?;
                     if retry_outcome.won_cas {
                         self.outbox_enqueuer.flush();
                     }
@@ -145,7 +156,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                     let mut retry_input = input;
                     retry_input.accumulated_text = String::new();
                     let retry_outcome =
-                        self.try_finalize(&retry_input)
+                        self.try_finalize(&retry_input, trace_id)
                             .await
                             .map_err(|fe| match fe {
                                 FinalizationError::Domain(de) => de,
@@ -178,6 +189,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
     async fn try_finalize(
         &self,
         input: &FinalizationInput,
+        trace_id: Option<String>,
     ) -> Result<FinalizationOutcome, FinalizationError> {
         let turn_repo = Arc::clone(&self.turn_repo);
         let message_repo = Arc::clone(&self.message_repo);
@@ -288,14 +300,20 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
                             .map_err(to_db)?;
                     }
 
-                    // 5. Enqueue outbox event via domain trait
-                    let event = build_usage_event(&input, billing, &settlement_outcome);
+                    // 5. Enqueue usage outbox event
+                    let usage_event = build_usage_event(&input, billing, &settlement_outcome);
                     outbox_enqueuer
-                        .enqueue_usage_event(tx, event)
+                        .enqueue_usage_event(tx, usage_event)
                         .await
                         .map_err(to_db)?;
 
-                    // 6. Return outcome
+                    // 6. Enqueue audit outbox event
+                    let audit_event = build_turn_audit_envelope(&input, trace_id);
+                    outbox_enqueuer
+                        .enqueue_audit_event(tx, audit_event)
+                        .await
+                        .map_err(to_db)?;
+
                     Ok(FinalizationOutcome {
                         won_cas: true,
                         billing_outcome: Some(billing),
@@ -400,6 +418,56 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
     }
 }
 
+fn build_turn_audit_envelope(input: &FinalizationInput, trace_id: Option<String>) -> AuditEnvelope {
+    let event_type = match input.terminal_state {
+        TurnState::Completed => TurnAuditEventType::TurnCompleted,
+        _ => TurnAuditEventType::TurnFailed,
+    };
+
+    let usage = input.usage.unwrap_or(Usage {
+        input_tokens: 0,
+        output_tokens: 0,
+    });
+
+    AuditEnvelope::Turn(TurnAuditEvent {
+        event_type,
+        timestamp: time::OffsetDateTime::now_utc(),
+        tenant_id: input.tenant_id,
+        requester_type: input.requester_type,
+        trace_id,
+        user_id: input.user_id,
+        chat_id: input.chat_id,
+        turn_id: input.turn_id,
+        request_id: input.request_id,
+        selected_model: input.selected_model.clone(),
+        effective_model: input.effective_model.clone(),
+        policy_version_applied: Some(input.policy_version_applied.cast_unsigned()),
+        usage: AuditUsageTokens {
+            input_tokens: usage.input_tokens.cast_unsigned(),
+            output_tokens: usage.output_tokens.cast_unsigned(),
+            model: Some(input.effective_model.clone()),
+        },
+        latency_ms: LatencyMs {
+            ttft_ms: input.ttft_ms,
+            total_ms: input.total_ms,
+        },
+        policy_decisions: PolicyDecisions {
+            license: None,
+            quota: QuotaDecision {
+                decision: input.quota_decision.clone(),
+                quota_scope: None,
+                downgrade_from: input.downgrade_from.clone(),
+                downgrade_reason: input.downgrade_reason.clone(),
+            },
+        },
+        error_code: input.error_code.clone(),
+        prompt: None,
+        response: None,
+        attachments: Vec::new(),
+        tool_calls: None,
+    })
+}
+
 fn build_usage_event(
     input: &FinalizationInput,
     billing: BillingDerivation,
@@ -453,7 +521,10 @@ mod tests {
     use crate::domain::model::finalization::FinalizationInput;
     use crate::domain::model::quota::{SettlementMethod, SettlementOutcome};
     use crate::domain::repos::{CreateTurnParams, TurnRepository as TurnRepoTrait};
-    use crate::domain::service::test_helpers::{inmem_db, mock_db_provider};
+    use crate::domain::service::AuditEnvelope;
+    use crate::domain::service::test_helpers::{
+        RecordingOutboxEnqueuer, inmem_db, mock_db_provider,
+    };
     use crate::infra::db::entity::chat_turn::TurnState;
     use crate::infra::db::entity::quota_usage::PeriodType;
     use crate::infra::db::repo::message_repo::MessageRepository as MsgRepo;
@@ -497,6 +568,7 @@ mod tests {
             }
         }
 
+        #[allow(dead_code)]
         fn flush_count(&self) -> u32 {
             self.flush_count.load(std::sync::atomic::Ordering::Relaxed)
         }
@@ -520,6 +592,14 @@ mod tests {
             Ok(())
         }
 
+        async fn enqueue_audit_event(
+            &self,
+            _runner: &(dyn modkit_db::secure::DBRunner + Sync),
+            _event: crate::domain::model::audit_envelope::AuditEnvelope,
+        ) -> Result<(), DomainError> {
+            Ok(())
+        }
+
         fn flush(&self) {
             self.flush_count
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -530,9 +610,9 @@ mod tests {
         db: Arc<DbProvider>,
     ) -> (
         FinalizationService<TurnRepo, MsgRepo>,
-        Arc<NoopOutboxEnqueuer>,
+        Arc<RecordingOutboxEnqueuer>,
     ) {
-        let outbox = Arc::new(NoopOutboxEnqueuer::new());
+        let outbox = Arc::new(RecordingOutboxEnqueuer::new());
         let svc = FinalizationService::new(
             db,
             Arc::new(TurnRepo),
@@ -644,6 +724,7 @@ mod tests {
             chat_id,
             request_id,
             user_id,
+            requester_type: mini_chat_sdk::RequesterType::User,
             scope: AccessScope::allow_all(),
             message_id: Uuid::new_v4(),
             terminal_state,
@@ -670,6 +751,8 @@ mod tests {
                 (PeriodType::Monthly, month_start),
             ],
             web_search_calls: 3,
+            ttft_ms: None,
+            total_ms: None,
         }
     }
 
@@ -807,7 +890,7 @@ mod tests {
                 max: 100,
             })),
             Arc::new(FailingQuotaSettler),
-            Arc::new(NoopOutboxEnqueuer::new()),
+            Arc::new(RecordingOutboxEnqueuer::new()),
             Arc::new(crate::domain::ports::metrics::NoopMetrics),
         );
 
@@ -1046,5 +1129,225 @@ mod tests {
             .expect("turn should exist");
         assert_eq!(turn.state, TurnState::Completed);
         assert!(turn.assistant_message_id.is_some());
+    }
+
+    // ── Audit emission tests ──
+
+    #[tokio::test]
+    async fn cas_winner_emits_turn_completed_audit() {
+        let db = mock_db_provider(inmem_db().await);
+        let (svc, outbox) = build_finalization_service(Arc::clone(&db));
+
+        let tenant_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        insert_test_chat(&db, tenant_id, chat_id, user_id).await;
+        insert_running_turn(&db, tenant_id, chat_id, turn_id, request_id).await;
+
+        let input = make_input(
+            tenant_id,
+            chat_id,
+            turn_id,
+            request_id,
+            user_id,
+            TurnState::Completed,
+        );
+        let outcome = svc.finalize_turn_cas(input).await.unwrap();
+        assert!(outcome.won_cas);
+
+        let captured = outbox.audit_events();
+        assert_eq!(captured.len(), 1, "expected exactly 1 audit event");
+        match &captured[0] {
+            AuditEnvelope::Turn(evt) => {
+                assert_eq!(
+                    evt.event_type,
+                    mini_chat_sdk::TurnAuditEventType::TurnCompleted
+                );
+                assert_eq!(evt.tenant_id, tenant_id);
+                assert_eq!(evt.user_id, user_id);
+                assert_eq!(evt.chat_id, chat_id);
+                assert_eq!(evt.turn_id, turn_id);
+                assert_eq!(evt.request_id, request_id);
+                assert_eq!(evt.effective_model, "gpt-5.2");
+                assert_eq!(evt.selected_model, "gpt-5.2");
+                assert_eq!(evt.usage.input_tokens, 10);
+                assert_eq!(evt.usage.output_tokens, 5);
+                assert!(evt.prompt.is_none(), "prompt should be deferred (None)");
+                assert!(evt.response.is_none(), "response should be deferred (None)");
+                assert!(evt.tool_calls.is_none(), "tool_calls should be None");
+            }
+            other => panic!("expected Turn event, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cas_winner_emits_turn_failed_audit() {
+        let db = mock_db_provider(inmem_db().await);
+        let (svc, outbox) = build_finalization_service(Arc::clone(&db));
+
+        let tenant_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        insert_test_chat(&db, tenant_id, chat_id, user_id).await;
+        insert_running_turn(&db, tenant_id, chat_id, turn_id, request_id).await;
+
+        let mut input = make_input(
+            tenant_id,
+            chat_id,
+            turn_id,
+            request_id,
+            user_id,
+            TurnState::Failed,
+        );
+        input.error_code = Some("provider_error".to_owned());
+
+        let outcome = svc.finalize_turn_cas(input).await.unwrap();
+        assert!(outcome.won_cas);
+
+        let captured = outbox.audit_events();
+        assert_eq!(captured.len(), 1);
+        match &captured[0] {
+            AuditEnvelope::Turn(evt) => {
+                assert_eq!(
+                    evt.event_type,
+                    mini_chat_sdk::TurnAuditEventType::TurnFailed
+                );
+                assert_eq!(evt.error_code, Some("provider_error".to_owned()));
+            }
+            other => panic!("expected Turn event, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn cas_loser_does_not_emit_audit() {
+        let db = mock_db_provider(inmem_db().await);
+        let (svc, outbox) = build_finalization_service(Arc::clone(&db));
+
+        let tenant_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        insert_test_chat(&db, tenant_id, chat_id, user_id).await;
+        insert_running_turn(&db, tenant_id, chat_id, turn_id, request_id).await;
+
+        // First finalization wins CAS
+        let input1 = make_input(
+            tenant_id,
+            chat_id,
+            turn_id,
+            request_id,
+            user_id,
+            TurnState::Completed,
+        );
+        svc.finalize_turn_cas(input1).await.unwrap();
+        outbox.clear_audit_events();
+
+        // Second finalization loses CAS — no audit
+        let input2 = make_input(
+            tenant_id,
+            chat_id,
+            turn_id,
+            request_id,
+            user_id,
+            TurnState::Failed,
+        );
+        let outcome2 = svc.finalize_turn_cas(input2).await.unwrap();
+        assert!(!outcome2.won_cas);
+
+        assert!(
+            outbox.audit_events().is_empty(),
+            "CAS loser must not emit audit events"
+        );
+    }
+
+    #[tokio::test]
+    async fn audit_event_includes_latency_when_provided() {
+        let db = mock_db_provider(inmem_db().await);
+        let (svc, outbox) = build_finalization_service(Arc::clone(&db));
+
+        let tenant_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        insert_test_chat(&db, tenant_id, chat_id, user_id).await;
+        insert_running_turn(&db, tenant_id, chat_id, turn_id, request_id).await;
+
+        let mut input = make_input(
+            tenant_id,
+            chat_id,
+            turn_id,
+            request_id,
+            user_id,
+            TurnState::Completed,
+        );
+        input.ttft_ms = Some(120);
+        input.total_ms = Some(3500);
+
+        svc.finalize_turn_cas(input).await.unwrap();
+
+        let captured = outbox.audit_events();
+        match &captured[0] {
+            AuditEnvelope::Turn(evt) => {
+                assert_eq!(evt.latency_ms.ttft_ms, Some(120));
+                assert_eq!(evt.latency_ms.total_ms, Some(3500));
+            }
+            other => panic!("expected Turn event, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn audit_event_policy_decisions_match_input() {
+        let db = mock_db_provider(inmem_db().await);
+        let (svc, outbox) = build_finalization_service(Arc::clone(&db));
+
+        let tenant_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let request_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+
+        insert_test_chat(&db, tenant_id, chat_id, user_id).await;
+        insert_running_turn(&db, tenant_id, chat_id, turn_id, request_id).await;
+
+        let mut input = make_input(
+            tenant_id,
+            chat_id,
+            turn_id,
+            request_id,
+            user_id,
+            TurnState::Completed,
+        );
+        input.quota_decision = "downgrade".to_owned();
+        input.downgrade_from = Some("gpt-5.2".to_owned());
+        input.downgrade_reason = Some("quota exceeded".to_owned());
+
+        svc.finalize_turn_cas(input).await.unwrap();
+
+        let captured = outbox.audit_events();
+        match &captured[0] {
+            AuditEnvelope::Turn(evt) => {
+                assert_eq!(evt.policy_decisions.quota.decision, "downgrade");
+                assert_eq!(
+                    evt.policy_decisions.quota.downgrade_from,
+                    Some("gpt-5.2".to_owned())
+                );
+                assert_eq!(
+                    evt.policy_decisions.quota.downgrade_reason,
+                    Some("quota exceeded".to_owned())
+                );
+                assert_eq!(evt.policy_version_applied, Some(1));
+            }
+            other => panic!("expected Turn event, got: {other:?}"),
+        }
     }
 }

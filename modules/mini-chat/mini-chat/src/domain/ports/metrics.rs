@@ -76,7 +76,7 @@ pub trait MiniChatMetricsPort: Send + Sync {
     // ── P0: Audit Emission Health (2 metrics) ──────────────────────────
 
     /// `{prefix}_audit_emit_total` — counter
-    /// `result`: `ok`, `failed`, `dropped`
+    /// `result`: `ok`, `retry`, `reject`
     fn record_audit_emit(&self, result: &str);
 
     /// `{prefix}_finalization_latency_ms` — histogram

@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -6,18 +7,22 @@ use authz_resolver_sdk::{
     constraints::{Constraint, EqPredicate, Predicate},
     models::{DenyReason, EvaluationRequest, EvaluationResponse, EvaluationResponseContext},
 };
+
 use modkit_db::{
     ConnectOpts, DBProvider, Db, connect_db, migration_runner::run_migrations_for_testing,
 };
 use modkit_security::{SecurityContext, pep_properties};
 use sea_orm_migration::MigratorTrait;
+
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
 use crate::domain::models::ResolvedModel;
 use crate::domain::repos::{
-    ModelResolver, PolicySnapshotProvider, ThreadSummaryRepository, UserLimitsProvider,
+    AttachmentCleanupEvent, ModelResolver, OutboxEnqueuer, PolicySnapshotProvider,
+    ThreadSummaryRepository, UserLimitsProvider,
 };
+use crate::domain::service::AuditEnvelope;
 
 // ── Mock AuthZ Resolver ──
 
@@ -754,8 +759,6 @@ pub async fn insert_test_message_attachment(
 
 // ── Noop & Recording OutboxEnqueuer ──
 
-use crate::domain::repos::{AttachmentCleanupEvent, OutboxEnqueuer};
-
 /// No-op outbox enqueuer for tests that don't need outbox assertions.
 #[allow(de0309_must_have_domain_model)]
 pub struct NoopOutboxEnqueuer;
@@ -776,6 +779,13 @@ impl OutboxEnqueuer for NoopOutboxEnqueuer {
     ) -> Result<(), crate::domain::error::DomainError> {
         Ok(())
     }
+    async fn enqueue_audit_event(
+        &self,
+        _runner: &(dyn modkit_db::secure::DBRunner + Sync),
+        _event: AuditEnvelope,
+    ) -> Result<(), crate::domain::error::DomainError> {
+        Ok(())
+    }
     fn flush(&self) {}
 }
 
@@ -784,6 +794,8 @@ impl OutboxEnqueuer for NoopOutboxEnqueuer {
 pub struct RecordingOutboxEnqueuer {
     pub usage_events: Mutex<Vec<mini_chat_sdk::UsageEvent>>,
     pub cleanup_events: Mutex<Vec<AttachmentCleanupEvent>>,
+    recorded_audit_events: Mutex<Vec<AuditEnvelope>>,
+    recorded_flush_count: AtomicU32,
 }
 
 impl RecordingOutboxEnqueuer {
@@ -791,7 +803,21 @@ impl RecordingOutboxEnqueuer {
         Self {
             usage_events: Mutex::new(Vec::new()),
             cleanup_events: Mutex::new(Vec::new()),
+            recorded_audit_events: Mutex::new(Vec::new()),
+            recorded_flush_count: AtomicU32::new(0),
         }
+    }
+
+    pub fn audit_events(&self) -> Vec<AuditEnvelope> {
+        self.recorded_audit_events.lock().unwrap().clone()
+    }
+
+    pub fn clear_audit_events(&self) {
+        self.recorded_audit_events.lock().unwrap().clear();
+    }
+
+    pub fn flush_count(&self) -> u32 {
+        self.recorded_flush_count.load(Ordering::SeqCst)
     }
 }
 
@@ -813,7 +839,17 @@ impl OutboxEnqueuer for RecordingOutboxEnqueuer {
         self.cleanup_events.lock().unwrap().push(event);
         Ok(())
     }
-    fn flush(&self) {}
+    async fn enqueue_audit_event(
+        &self,
+        _runner: &(dyn modkit_db::secure::DBRunner + Sync),
+        event: AuditEnvelope,
+    ) -> Result<(), crate::domain::error::DomainError> {
+        self.recorded_audit_events.lock().unwrap().push(event);
+        Ok(())
+    }
+    fn flush(&self) {
+        self.recorded_flush_count.fetch_add(1, Ordering::SeqCst);
+    }
 }
 
 /// Outbox enqueuer that fails on `enqueue_attachment_cleanup` for rollback testing.
@@ -837,6 +873,13 @@ impl OutboxEnqueuer for FailingOutboxEnqueuer {
         Err(crate::domain::error::DomainError::database(
             "simulated outbox enqueue failure".to_owned(),
         ))
+    }
+    async fn enqueue_audit_event(
+        &self,
+        _runner: &(dyn modkit_db::secure::DBRunner + Sync),
+        _event: AuditEnvelope,
+    ) -> Result<(), crate::domain::error::DomainError> {
+        Ok(())
     }
     fn flush(&self) {}
 }
@@ -1011,7 +1054,7 @@ impl ServiceGatewayClientV1 for MockOagwGateway {
 
 // ── TestMetrics — recording implementation for metric assertions ─────
 
-use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64};
 
 /// Lightweight `MiniChatMetricsPort` that records counter increments
 /// and histogram observation counts via atomics. Used to verify that

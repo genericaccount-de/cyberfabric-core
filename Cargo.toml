@@ -79,7 +79,6 @@ members = [
     "modules/mini-chat/mini-chat-sdk",
     "modules/mini-chat/mini-chat",
     "modules/mini-chat/plugins/static-model-policy-plugin",
-    "modules/mini-chat/plugins/static-audit-plugin",
 ]
 exclude = ["fuzz"]
 resolver = "3"

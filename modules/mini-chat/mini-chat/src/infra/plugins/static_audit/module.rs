@@ -1,7 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
-use mini_chat_sdk::{MiniChatAuditPluginClientV1, MiniChatAuditPluginSpecV1};
 use modkit::Module;
 use modkit::client_hub::ClientScope;
 use modkit::context::ModuleCtx;
@@ -9,8 +8,10 @@ use modkit::gts::BaseModkitPluginV1;
 use tracing::info;
 use types_registry_sdk::{RegisterResult, TypesRegistryClient};
 
-use crate::config::StaticMiniChatAuditPluginConfig;
-use crate::domain::Service;
+use mini_chat_sdk::{MiniChatAuditPluginClientV1, MiniChatAuditPluginSpecV1};
+
+use super::config::StaticMiniChatAuditPluginConfig;
+use super::service::Service;
 
 const VENDOR: &str = "cyber-fabric";
 const PRIORITY: i16 = 100;

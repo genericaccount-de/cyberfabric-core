@@ -37,6 +37,10 @@ pub mod result {
     pub const FORBIDDEN: &str = "forbidden";
     pub const GENERATION_IN_PROGRESS: &str = "generation_in_progress";
     pub const ERROR: &str = "error";
+    /// Audit emit transient failure — will be retried by the outbox.
+    pub const RETRY: &str = "retry";
+    /// Audit emit permanent failure — dead-lettered by the outbox.
+    pub const REJECT: &str = "reject";
 }
 
 /// Quota preflight decision labels (`decision` label).

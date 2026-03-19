@@ -33,6 +33,18 @@ impl GtsPluginSelector {
         }
     }
 
+    /// Create a selector with `value` already cached, skipping resolution entirely.
+    ///
+    /// Useful in tests to pre-warm the selector with a known instance ID or
+    /// an empty-string sentinel (meaning "no plugin configured").
+    #[must_use]
+    pub fn pre_cached(value: String) -> Self {
+        Self {
+            cached: RwLock::new(Some(Arc::from(value))),
+            resolve_lock: Mutex::new(()),
+        }
+    }
+
     /// Returns the cached instance ID, or resolves it using the provided function.
     ///
     /// Uses a single-flight pattern: even under concurrent callers, the resolve

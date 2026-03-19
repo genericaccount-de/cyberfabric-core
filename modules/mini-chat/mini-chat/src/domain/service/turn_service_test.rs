@@ -4,10 +4,10 @@ use modkit_security::AccessScope;
 use uuid::Uuid;
 
 use crate::domain::repos::{ChatRepository, MessageRepository, TurnRepository};
-use crate::domain::service::TurnService;
 use crate::domain::service::test_helpers::TestMetrics;
 use crate::domain::service::test_helpers::*;
 use crate::domain::service::turn_service::MutationError;
+use crate::domain::service::{AuditEnvelope, TurnService};
 use crate::infra::db::entity::chat_turn::TurnState;
 use crate::infra::db::repo;
 use std::sync::atomic::Ordering;
@@ -75,6 +75,7 @@ async fn setup() -> (
         chat_repo,
         Arc::new(crate::infra::db::repo::message_attachment_repo::MessageAttachmentRepository),
         mock_enforcer(),
+        Arc::new(RecordingOutboxEnqueuer::new()),
         Arc::new(crate::domain::ports::metrics::NoopMetrics),
     );
 
@@ -739,6 +740,7 @@ async fn delete_success_emits_metrics() {
         chat_repo,
         Arc::new(crate::infra::db::repo::message_attachment_repo::MessageAttachmentRepository),
         mock_enforcer(),
+        Arc::new(RecordingOutboxEnqueuer::new()),
         Arc::clone(&metrics) as _,
     );
 
@@ -763,6 +765,218 @@ async fn delete_success_emits_metrics() {
         metrics.turn_mutation_latency_ms.load(Ordering::Relaxed),
         1,
         "should record turn_mutation_latency_ms histogram"
+    );
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Audit event emission
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Setup identical to `setup()` but with a [`RecordingOutboxEnqueuer`] so we
+/// can assert on enqueued audit events synchronously — no flush needed.
+async fn setup_with_audit() -> (
+    TurnService<
+        repo::turn_repo::TurnRepository,
+        repo::message_repo::MessageRepository,
+        repo::chat_repo::ChatRepository,
+        repo::message_attachment_repo::MessageAttachmentRepository,
+    >,
+    modkit_security::SecurityContext,
+    Uuid, // chat_id
+    Uuid, // tenant_id
+    Arc<RecordingOutboxEnqueuer>,
+) {
+    let db = inmem_db().await;
+    let db = mock_db_provider(db);
+    let tenant_id = Uuid::new_v4();
+    let ctx = test_security_ctx(tenant_id);
+
+    let chat_repo = Arc::new(repo::chat_repo::ChatRepository::new(
+        modkit_db::odata::LimitCfg {
+            default: 20,
+            max: 100,
+        },
+    ));
+    let turn_repo = Arc::new(repo::turn_repo::TurnRepository);
+    let message_repo = Arc::new(repo::message_repo::MessageRepository::new(
+        modkit_db::odata::LimitCfg {
+            default: 20,
+            max: 100,
+        },
+    ));
+
+    let chat_id = Uuid::now_v7();
+    let scope = AccessScope::for_tenant(tenant_id);
+    let conn = db.conn().unwrap();
+    chat_repo
+        .create(
+            &conn,
+            &scope,
+            crate::domain::models::Chat {
+                id: chat_id,
+                tenant_id,
+                user_id: ctx.subject_id(),
+                model: "gpt-5.2".to_owned(),
+                title: Some("Test chat".to_owned()),
+                is_temporary: false,
+                created_at: time::OffsetDateTime::now_utc(),
+                updated_at: time::OffsetDateTime::now_utc(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let outbox = Arc::new(RecordingOutboxEnqueuer::new());
+    let svc = TurnService::new(
+        Arc::clone(&db),
+        turn_repo,
+        message_repo,
+        chat_repo,
+        Arc::new(crate::infra::db::repo::message_attachment_repo::MessageAttachmentRepository),
+        mock_enforcer(),
+        Arc::clone(&outbox) as Arc<dyn crate::domain::repos::OutboxEnqueuer>,
+        Arc::new(crate::domain::ports::metrics::NoopMetrics),
+    );
+
+    (svc, ctx, chat_id, tenant_id, outbox)
+}
+
+#[tokio::test]
+async fn delete_emits_turn_delete_audit_event() {
+    let (svc, ctx, chat_id, tenant_id, outbox) = setup_with_audit().await;
+
+    let request_id = create_completed_turn(
+        &svc.db,
+        &*svc.turn_repo,
+        &*svc.message_repo,
+        tenant_id,
+        chat_id,
+        ctx.subject_id(),
+    )
+    .await;
+
+    svc.delete(&ctx, chat_id, request_id).await.unwrap();
+
+    let captured = outbox.audit_events();
+    assert_eq!(captured.len(), 1, "expected exactly 1 audit event");
+    match &captured[0] {
+        AuditEnvelope::Delete(evt) => {
+            assert_eq!(evt.tenant_id, tenant_id);
+            assert_eq!(evt.actor_user_id, ctx.subject_id());
+            assert_eq!(evt.chat_id, chat_id);
+            assert_eq!(evt.request_id, request_id);
+        }
+        other => panic!("expected Delete event, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn delete_failure_does_not_emit_audit_event() {
+    let (svc, ctx, chat_id, _, outbox) = setup_with_audit().await;
+
+    // Non-existent turn → transaction rolls back, audit event not enqueued.
+    svc.delete(&ctx, chat_id, Uuid::new_v4()).await.unwrap_err();
+
+    assert!(
+        outbox.audit_events().is_empty(),
+        "no audit event should be enqueued on failure"
+    );
+}
+
+#[tokio::test]
+async fn retry_emits_turn_retry_audit_event() {
+    let (svc, ctx, chat_id, tenant_id, outbox) = setup_with_audit().await;
+
+    let request_id = create_completed_turn(
+        &svc.db,
+        &*svc.turn_repo,
+        &*svc.message_repo,
+        tenant_id,
+        chat_id,
+        ctx.subject_id(),
+    )
+    .await;
+
+    let result = svc.retry(&ctx, chat_id, request_id).await.unwrap();
+
+    let captured = outbox.audit_events();
+    assert_eq!(captured.len(), 1, "expected exactly 1 audit event");
+    match &captured[0] {
+        AuditEnvelope::Mutation(evt) => {
+            assert_eq!(evt.tenant_id, tenant_id);
+            assert_eq!(evt.actor_user_id, ctx.subject_id());
+            assert_eq!(evt.chat_id, chat_id);
+            assert_eq!(evt.original_request_id, request_id);
+            assert_eq!(evt.new_request_id, result.new_request_id);
+            assert_eq!(
+                evt.event_type,
+                mini_chat_sdk::TurnMutationAuditEventType::TurnRetry
+            );
+        }
+        other => panic!("expected Mutation(Retry) event, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn retry_failure_does_not_emit_audit_event() {
+    let (svc, ctx, chat_id, _, outbox) = setup_with_audit().await;
+
+    svc.retry(&ctx, chat_id, Uuid::new_v4()).await.unwrap_err();
+
+    assert!(
+        outbox.audit_events().is_empty(),
+        "no audit event should be enqueued on failure"
+    );
+}
+
+#[tokio::test]
+async fn edit_emits_turn_edit_audit_event() {
+    let (svc, ctx, chat_id, tenant_id, outbox) = setup_with_audit().await;
+
+    let request_id = create_completed_turn(
+        &svc.db,
+        &*svc.turn_repo,
+        &*svc.message_repo,
+        tenant_id,
+        chat_id,
+        ctx.subject_id(),
+    )
+    .await;
+
+    let result = svc
+        .edit(&ctx, chat_id, request_id, "Edited text".to_owned())
+        .await
+        .unwrap();
+
+    let captured = outbox.audit_events();
+    assert_eq!(captured.len(), 1, "expected exactly 1 audit event");
+    match &captured[0] {
+        AuditEnvelope::Mutation(evt) => {
+            assert_eq!(evt.tenant_id, tenant_id);
+            assert_eq!(evt.actor_user_id, ctx.subject_id());
+            assert_eq!(evt.chat_id, chat_id);
+            assert_eq!(evt.original_request_id, request_id);
+            assert_eq!(evt.new_request_id, result.new_request_id);
+            assert_eq!(
+                evt.event_type,
+                mini_chat_sdk::TurnMutationAuditEventType::TurnEdit
+            );
+        }
+        other => panic!("expected Mutation(Edit) event, got: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn edit_failure_does_not_emit_audit_event() {
+    let (svc, ctx, chat_id, _, outbox) = setup_with_audit().await;
+
+    svc.edit(&ctx, chat_id, Uuid::new_v4(), "new".to_owned())
+        .await
+        .unwrap_err();
+
+    assert!(
+        outbox.audit_events().is_empty(),
+        "no audit event should be enqueued on failure"
     );
 }
 
@@ -828,6 +1042,7 @@ async fn setup_tenant_only_authz(
         chat_repo,
         Arc::new(crate::infra::db::repo::message_attachment_repo::MessageAttachmentRepository),
         mock_tenant_only_enforcer(),
+        Arc::new(RecordingOutboxEnqueuer::new()),
         Arc::new(crate::domain::ports::metrics::NoopMetrics),
     );
 
@@ -841,7 +1056,6 @@ async fn get_turn_tenant_only_authz_cross_owner_not_found() {
 
     let (svc, tenant_id, chat_id) = setup_tenant_only_authz(user_a).await;
 
-    // Create a turn owned by user_a
     let request_id = create_completed_turn(
         &svc.db,
         &*svc.turn_repo,
