@@ -1,4 +1,5 @@
-//! Single-pass expansion of `${VAR}` placeholders from environment variables.
+//! Single-pass expansion of `${VAR}` and `${VAR:-default}` placeholders from environment
+//! variables.
 
 use std::sync::LazyLock;
 
@@ -36,18 +37,28 @@ impl std::error::Error for ExpandVarsError {
     }
 }
 
-/// Expand `${VAR_NAME}` placeholders in `input` with values from the environment.
+/// Expand `${VAR_NAME}` and `${VAR_NAME:-default}` placeholders in `input` with values
+/// from the environment.
+///
+/// - `${VAR}` — replaced with the value of `VAR`; **errors** if the variable is not set.
+/// - `${VAR:-value}` — replaced with the value of `VAR`, or `value` if the variable is
+///   not set. An empty default (`${VAR:-}`) is allowed and expands to the empty string.
+///   Default values must not contain `}` (nested `${…}` placeholders are not supported).
+/// - If a variable is set but empty, its (empty) value is always used regardless of any
+///   default.
 ///
 /// Uses single-pass `Regex::replace_all` so that values themselves containing
-/// `${...}` are **not** re-expanded.  Fails on the first unresolvable variable.
+/// `${...}` are **not** re-expanded.  Fails on the first unresolvable variable
+/// that has no default.
 ///
 /// # Errors
 ///
 /// Returns [`ExpandVarsError::Var`] if a referenced environment variable is missing
-/// or contains invalid Unicode.
+/// and no default value was provided.
 pub fn expand_env_vars(input: &str) -> Result<String, ExpandVarsError> {
-    static RE: LazyLock<Result<Regex, String>> =
-        LazyLock::new(|| Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}").map_err(|e| e.to_string()));
+    static RE: LazyLock<Result<Regex, String>> = LazyLock::new(|| {
+        Regex::new(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-((?:[^}])*))?\}").map_err(|e| e.to_string())
+    });
     let re = RE.as_ref().map_err(|e| ExpandVarsError::Regex(e.clone()))?;
 
     let mut err: Option<ExpandVarsError> = None;
@@ -59,6 +70,11 @@ pub fn expand_env_vars(input: &str) -> Result<String, ExpandVarsError> {
         match std::env::var(name) {
             Ok(val) => val,
             Err(e) => {
+                if matches!(&e, std::env::VarError::NotPresent)
+                    && let Some(default) = caps.get(2)
+                {
+                    return default.as_str().to_owned();
+                }
                 err = Some(ExpandVarsError::Var {
                     name: name.to_owned(),
                     source: e,
@@ -197,6 +213,63 @@ mod tests {
                 assert!(
                     matches!(&err, ExpandVarsError::Var { name, .. } if name == "EXPAND_FIRST_MISS")
                 );
+            },
+        );
+    }
+
+    #[test]
+    fn default_value_used_when_var_missing() {
+        temp_env::with_vars([("EXPAND_DEF_MISS", None::<&str>)], || {
+            let result = expand_env_vars("${EXPAND_DEF_MISS:-8080}").unwrap();
+            assert_eq!(result, "8080");
+        });
+    }
+
+    #[test]
+    fn empty_default_expands_to_empty_string() {
+        temp_env::with_vars([("EXPAND_DEF_EMPTY", None::<&str>)], || {
+            let result = expand_env_vars("prefix_${EXPAND_DEF_EMPTY:-}_suffix").unwrap();
+            assert_eq!(result, "prefix__suffix");
+        });
+    }
+
+    #[test]
+    fn default_ignored_when_var_is_set() {
+        temp_env::with_vars([("EXPAND_DEF_SET", Some("actual"))], || {
+            let result = expand_env_vars("${EXPAND_DEF_SET:-fallback}").unwrap();
+            assert_eq!(result, "actual");
+        });
+    }
+
+    #[test]
+    fn empty_var_uses_empty_value_not_default() {
+        temp_env::with_vars([("EXPAND_DEF_EMPTYVAL", Some(""))], || {
+            let result = expand_env_vars("${EXPAND_DEF_EMPTYVAL:-fallback}").unwrap();
+            assert_eq!(result, "");
+        });
+    }
+
+    #[test]
+    fn no_default_still_errors_on_missing() {
+        temp_env::with_vars([("EXPAND_DEF_NODEF", None::<&str>)], || {
+            let err = expand_env_vars("${EXPAND_DEF_NODEF}").unwrap_err();
+            assert!(
+                matches!(&err, ExpandVarsError::Var { name, .. } if name == "EXPAND_DEF_NODEF")
+            );
+        });
+    }
+
+    #[test]
+    fn multiple_defaults_in_one_string() {
+        temp_env::with_vars(
+            [
+                ("EXPAND_MULTI_A", None::<&str>),
+                ("EXPAND_MULTI_B", Some("set")),
+            ],
+            || {
+                let result =
+                    expand_env_vars("${EXPAND_MULTI_A:-alpha}_${EXPAND_MULTI_B:-beta}").unwrap();
+                assert_eq!(result, "alpha_set");
             },
         );
     }

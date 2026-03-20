@@ -11,7 +11,8 @@ use crate::domain::repos::{
 };
 use crate::domain::service::test_helpers::{
     MockThreadSummaryRepo, inmem_db, mock_db_provider, mock_enforcer, mock_model_resolver,
-    mock_thread_summary_repo, test_security_ctx,
+    mock_tenant_only_enforcer, mock_thread_summary_repo, test_security_ctx,
+    test_security_ctx_with_id,
 };
 use crate::infra::db::repo::chat_repo::ChatRepository as OrmChatRepository;
 use crate::infra::db::repo::message_repo::MessageRepository as OrmMessageRepository;
@@ -54,6 +55,21 @@ fn build_reaction_service(
         message_repo,
         chat_repo,
         mock_enforcer(),
+    )
+}
+
+fn build_reaction_service_tenant_only_authz(
+    db_provider: Arc<crate::domain::service::DbProvider>,
+    chat_repo: Arc<OrmChatRepository>,
+) -> ReactionService<OrmReactionRepository, OrmMessageRepository, OrmChatRepository> {
+    let reaction_repo = Arc::new(OrmReactionRepository);
+    let message_repo = Arc::new(OrmMessageRepository::new(limit_cfg()));
+    ReactionService::new(
+        db_provider,
+        reaction_repo,
+        message_repo,
+        chat_repo,
+        mock_tenant_only_enforcer(),
     )
 }
 
@@ -362,5 +378,40 @@ async fn set_reaction_cross_tenant_rejected() {
     assert!(
         matches!(result.unwrap_err(), DomainError::ChatNotFound { .. }),
         "Expected ChatNotFound for cross-tenant access"
+    );
+}
+
+// ── Tenant-only AuthZ: user isolation via ensure_owner ──
+
+#[tokio::test]
+async fn set_reaction_tenant_only_authz_cross_owner_not_found() {
+    let db = inmem_db().await;
+    let db_provider = mock_db_provider(db);
+    let chat_repo = Arc::new(OrmChatRepository::new(limit_cfg()));
+
+    let tenant_id = Uuid::new_v4();
+    let user_a = Uuid::new_v4();
+    let user_b = Uuid::new_v4();
+    let ctx_a = test_security_ctx_with_id(tenant_id, user_a);
+    let ctx_b = test_security_ctx_with_id(tenant_id, user_b);
+
+    // User A creates a chat with messages (using permissive enforcer for setup)
+    let (chat_id, _user_msg_id, assistant_msg_id) =
+        setup_chat_with_messages(&db_provider, &chat_repo, &ctx_a, tenant_id).await;
+
+    // User B (same tenant) tries to react via tenant-only enforcer
+    let reaction_svc =
+        build_reaction_service_tenant_only_authz(Arc::clone(&db_provider), Arc::clone(&chat_repo));
+    let result = reaction_svc
+        .set_reaction(&ctx_b, chat_id, assistant_msg_id, "like")
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Cross-owner reaction must fail with tenant-only authz"
+    );
+    assert!(
+        matches!(result.unwrap_err(), DomainError::ChatNotFound { .. }),
+        "Expected ChatNotFound for cross-owner access with tenant-only authz"
     );
 }

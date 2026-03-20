@@ -248,6 +248,17 @@ fn domain_err_to_sdk(err: DomainError) -> ServiceGatewayError {
         DomainError::RequestTimeout { detail, instance } => {
             ServiceGatewayError::RequestTimeout { detail, instance }
         }
+        DomainError::GuardRejected {
+            status,
+            error_code,
+            detail,
+            instance,
+        } => ServiceGatewayError::GuardRejected {
+            status,
+            error_code,
+            detail,
+            instance,
+        },
         DomainError::Forbidden { detail } => ServiceGatewayError::Forbidden { detail },
     }
 }
@@ -427,10 +438,17 @@ fn rate_limit_config_to_domain(v: oagw_sdk::RateLimitConfig) -> model::RateLimit
     }
 }
 
+fn plugin_binding_to_domain(v: oagw_sdk::PluginBinding) -> model::PluginBinding {
+    model::PluginBinding {
+        plugin_ref: v.plugin_ref,
+        config: v.config,
+    }
+}
+
 fn plugins_config_to_domain(v: oagw_sdk::PluginsConfig) -> model::PluginsConfig {
     model::PluginsConfig {
         sharing: sharing_mode_to_domain(v.sharing),
-        items: v.items,
+        items: v.items.into_iter().map(plugin_binding_to_domain).collect(),
     }
 }
 
@@ -536,7 +554,14 @@ fn upstream_to_sdk(u: model::Upstream) -> oagw_sdk::Upstream {
         }),
         plugins: u.plugins.map(|p| oagw_sdk::PluginsConfig {
             sharing: sharing_mode_to_sdk(p.sharing),
-            items: p.items,
+            items: p
+                .items
+                .into_iter()
+                .map(|b| oagw_sdk::PluginBinding {
+                    plugin_ref: b.plugin_ref,
+                    config: b.config,
+                })
+                .collect(),
         }),
         rate_limit: u.rate_limit.map(rate_limit_config_to_sdk),
         tags: u.tags,
@@ -575,7 +600,14 @@ fn route_to_sdk(r: model::Route) -> oagw_sdk::Route {
         },
         plugins: r.plugins.map(|p| oagw_sdk::PluginsConfig {
             sharing: sharing_mode_to_sdk(p.sharing),
-            items: p.items,
+            items: p
+                .items
+                .into_iter()
+                .map(|b| oagw_sdk::PluginBinding {
+                    plugin_ref: b.plugin_ref,
+                    config: b.config,
+                })
+                .collect(),
         }),
         rate_limit: r.rate_limit.map(rate_limit_config_to_sdk),
         tags: r.tags,

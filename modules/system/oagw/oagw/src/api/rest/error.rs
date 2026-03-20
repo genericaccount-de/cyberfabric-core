@@ -31,6 +31,7 @@ pub(crate) const ERR_UPSTREAM_DISABLED: &str =
 pub(crate) const ERR_CONNECTION_TIMEOUT: &str =
     "gts.x.core.errors.err.v1~x.oagw.timeout.connection.v1";
 pub(crate) const ERR_REQUEST_TIMEOUT: &str = "gts.x.core.errors.err.v1~x.oagw.timeout.request.v1";
+pub(crate) const ERR_GUARD_REJECTED: &str = "gts.x.core.errors.err.v1~x.oagw.guard.rejected.v1";
 pub(crate) const ERR_FORBIDDEN: &str = "gts.x.core.errors.err.v1~x.oagw.authz.forbidden.v1";
 
 // ---------------------------------------------------------------------------
@@ -56,6 +57,7 @@ fn gts_type(err: &DomainError) -> &str {
         DomainError::UpstreamDisabled { .. } => ERR_UPSTREAM_DISABLED,
         DomainError::ConnectionTimeout { .. } => ERR_CONNECTION_TIMEOUT,
         DomainError::RequestTimeout { .. } => ERR_REQUEST_TIMEOUT,
+        DomainError::GuardRejected { .. } => ERR_GUARD_REJECTED,
         DomainError::Forbidden { .. } => ERR_FORBIDDEN,
     }
 }
@@ -81,6 +83,10 @@ fn http_status_code(err: &DomainError) -> StatusCode {
         DomainError::ConnectionTimeout { .. } | DomainError::RequestTimeout { .. } => {
             StatusCode::GATEWAY_TIMEOUT
         }
+        DomainError::GuardRejected { status, .. } => StatusCode::from_u16(*status)
+            .ok()
+            .filter(|code| code.is_client_error() || code.is_server_error())
+            .unwrap_or(StatusCode::BAD_REQUEST),
         DomainError::Forbidden { .. } => StatusCode::FORBIDDEN,
     }
 }
@@ -102,6 +108,7 @@ fn error_title(err: &DomainError) -> &str {
         DomainError::UpstreamDisabled { .. } => "Upstream Disabled",
         DomainError::ConnectionTimeout { .. } => "Connection Timeout",
         DomainError::RequestTimeout { .. } => "Request Timeout",
+        DomainError::GuardRejected { .. } => "Guard Rejected",
         DomainError::Forbidden { .. } => "Forbidden",
     }
 }
@@ -119,7 +126,8 @@ fn error_instance(err: &DomainError) -> &str {
         | DomainError::DownstreamError { instance, .. }
         | DomainError::ProtocolError { instance, .. }
         | DomainError::ConnectionTimeout { instance, .. }
-        | DomainError::RequestTimeout { instance, .. } => instance,
+        | DomainError::RequestTimeout { instance, .. }
+        | DomainError::GuardRejected { instance, .. } => instance,
         DomainError::NotFound { .. }
         | DomainError::Conflict { .. }
         | DomainError::UpstreamDisabled { .. }
@@ -303,6 +311,12 @@ mod tests {
             DomainError::Internal {
                 message: "test".into(),
             },
+            DomainError::GuardRejected {
+                status: 400,
+                error_code: "MISSING_HEADER".into(),
+                detail: "test".into(),
+                instance: "/test".into(),
+            },
             DomainError::Forbidden {
                 detail: "test".into(),
             },
@@ -337,6 +351,66 @@ mod tests {
         };
         let p = domain_error_to_problem(err, "/fallback");
         assert_eq!(p.instance, "/oagw/v1/upstreams");
+    }
+
+    #[test]
+    fn guard_rejected_4xx_passes_through() {
+        let err = DomainError::GuardRejected {
+            status: 403,
+            error_code: "FORBIDDEN".into(),
+            detail: "test".into(),
+            instance: "/test".into(),
+        };
+        let p: Problem = err.into();
+        assert_eq!(p.status, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn guard_rejected_5xx_passes_through() {
+        let err = DomainError::GuardRejected {
+            status: 503,
+            error_code: "UNAVAILABLE".into(),
+            detail: "test".into(),
+            instance: "/test".into(),
+        };
+        let p: Problem = err.into();
+        assert_eq!(p.status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn guard_rejected_2xx_falls_back_to_400() {
+        let err = DomainError::GuardRejected {
+            status: 200,
+            error_code: "OK".into(),
+            detail: "test".into(),
+            instance: "/test".into(),
+        };
+        let p: Problem = err.into();
+        assert_eq!(p.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn guard_rejected_3xx_falls_back_to_400() {
+        let err = DomainError::GuardRejected {
+            status: 301,
+            error_code: "REDIRECT".into(),
+            detail: "test".into(),
+            instance: "/test".into(),
+        };
+        let p: Problem = err.into();
+        assert_eq!(p.status, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn guard_rejected_invalid_status_falls_back_to_400() {
+        let err = DomainError::GuardRejected {
+            status: 999,
+            error_code: "INVALID".into(),
+            detail: "test".into(),
+            instance: "/test".into(),
+        };
+        let p: Problem = err.into();
+        assert_eq!(p.status, StatusCode::BAD_REQUEST);
     }
 
     #[test]

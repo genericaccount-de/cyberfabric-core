@@ -459,19 +459,38 @@ pub async fn run_oop_with_options(opts: OopRunOptions) -> Result<()> {
     let (final_config, merged_logging, db_options) =
         build_oop_config_and_db(&config, &opts.module_name, rendered_config.as_ref())?;
 
-    // Initialize OTEL layer from rendered config's tracing settings (if available)
-    // OoP modules use master's tracing config, not their own local config
+    // Use OpenTelemetry config from rendered (master) config only.
+    // OoP modules do not fall back to local config for telemetry — if the master
+    // does not provide an opentelemetry section, telemetry is skipped entirely.
     #[cfg(feature = "otel")]
-    let otel_layer = rendered_config
+    let otel_cfg = rendered_config
         .as_ref()
-        .and_then(|rc| rc.tracing.as_ref())
+        .and_then(|rc| rc.opentelemetry.as_ref());
+
+    // Initialize OTEL tracing layer (if tracing is enabled)
+    #[cfg(feature = "otel")]
+    let otel_layer = otel_cfg
+        .filter(|cfg| cfg.tracing.enabled)
         .map(crate::telemetry::init_tracing)
         .transpose()?;
     #[cfg(not(feature = "otel"))]
     let otel_layer = None;
 
+    // Initialize OpenTelemetry metrics provider (if configured and enabled).
+    // Store error to log after logging is initialized.
+    #[cfg(feature = "otel")]
+    let metrics_init_error = otel_cfg
+        .filter(|cfg| cfg.metrics.enabled)
+        .and_then(|cfg| crate::telemetry::init::init_metrics_provider(cfg).err());
+
     // Initialize logging with MERGED config (master base + local override)
     init_logging_unified(&merged_logging, &config.server.home_dir, otel_layer);
+
+    // Now that logging is available, report deferred metrics init error
+    #[cfg(feature = "otel")]
+    if let Some(e) = metrics_init_error {
+        tracing::error!(error = %e, "OpenTelemetry metrics not initialized (OoP)");
+    }
 
     // Register custom panic hook to reroute panic backtrace into tracing.
     init_panic_tracing();
@@ -483,7 +502,7 @@ pub async fn run_oop_with_options(opts: OopRunOptions) -> Result<()> {
             has_database = rc.database.is_some(),
             has_config = !rc.config.is_null(),
             has_logging = rc.logging.is_some(),
-            has_tracing = rc.tracing.is_some(),
+            has_opentelemetry = rc.opentelemetry.is_some(),
             "Received rendered config from master host"
         );
     } else if std::env::var(MODKIT_MODULE_CONFIG_ENV).is_ok() {

@@ -337,6 +337,7 @@ impl ApiGateway {
         // 4) HTTP metrics (layer — captures all middleware responses including auth/rate-limit/timeout)
         let http_metrics = Arc::new(middleware::http_metrics::HttpMetrics::new(
             Self::MODULE_NAME,
+            &config.metrics.prefix,
         ));
         router = router.layer(from_fn_with_state(
             http_metrics,

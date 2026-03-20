@@ -6,6 +6,29 @@ decision-makers: OAGW Team
 
 # State Management — Data Plane L1 Cache and Rate Limiter Ownership
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [DP State](#dp-state)
+  - [CP State](#cp-state)
+  - [Request Flow with Caching](#request-flow-with-caching)
+  - [Cache Invalidation](#cache-invalidation)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [DP Stateless](#dp-stateless)
+  - [DP with L1 cache + rate limiters](#dp-with-l1-cache--rate-limiters)
+  - [CP owns rate limiters](#cp-owns-rate-limiters)
+- [Rationale](#rationale)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-state-management`
 
 ## Context and Problem Statement

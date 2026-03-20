@@ -1,5 +1,38 @@
 # Feature: Observability & Security Hardening
 
+
+<!-- toc -->
+
+- [1. Feature Context](#1-feature-context)
+  - [1.1 Overview](#11-overview)
+  - [1.2 Purpose](#12-purpose)
+  - [1.3 Actors](#13-actors)
+  - [1.4 References](#14-references)
+  - [1.5 Out of Scope](#15-out-of-scope)
+  - [1.6 Configuration Parameters](#16-configuration-parameters)
+  - [1.7 Non-Applicable Domains](#17-non-applicable-domains)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
+  - [Configure CORS Policy](#configure-cors-policy)
+  - [Review Prometheus Metrics](#review-prometheus-metrics)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
+  - [Metrics Collection Pipeline](#metrics-collection-pipeline)
+  - [Audit Log Emission](#audit-log-emission)
+  - [CORS Preflight Handler](#cors-preflight-handler)
+  - [SSRF Protection Validation](#ssrf-protection-validation)
+  - [HTTP Smuggling Prevention](#http-smuggling-prevention)
+  - [Multi-Layer Config Cache](#multi-layer-config-cache)
+- [4. States (CDSL)](#4-states-cdsl)
+- [5. Definitions of Done](#5-definitions-of-done)
+  - [Implement Prometheus Metrics](#implement-prometheus-metrics)
+  - [Implement Structured Audit Logging](#implement-structured-audit-logging)
+  - [Implement CORS Handling](#implement-cors-handling)
+  - [Implement SSRF Protection](#implement-ssrf-protection)
+  - [Implement HTTP Smuggling Prevention](#implement-http-smuggling-prevention)
+  - [Implement Multi-Layer Config Caching](#implement-multi-layer-config-caching)
+- [6. Acceptance Criteria](#6-acceptance-criteria)
+
+<!-- /toc -->
+
 - [ ] `p2` - **ID**: `cpt-cf-oagw-featstatus-observability-implemented`
 
 <!-- reference to DECOMPOSITION entry -->

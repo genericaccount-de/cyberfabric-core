@@ -155,23 +155,10 @@ async fn start_mutation_stream(
     chat_id: uuid::Uuid,
     mutation: crate::domain::service::MutationResult,
 ) -> Response {
-    let chat = match svc.chats.get_chat(&ctx, chat_id).await {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(error = %e, "failed to fetch chat for mutation stream");
-            return Problem::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal Error",
-                "An internal error occurred",
-            )
-            .into_response();
-        }
-    };
-
-    let chat_model = chat.model.clone();
+    let chat_model = mutation.chat_model.clone();
     let resolved = match svc
         .models
-        .resolve_model(ctx.subject_id(), Some(chat.model))
+        .resolve_model(ctx.subject_id(), Some(mutation.chat_model))
         .await
     {
         Ok(r) => r,

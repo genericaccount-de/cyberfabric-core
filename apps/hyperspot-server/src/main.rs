@@ -73,11 +73,17 @@ async fn main() -> Result<()> {
     let mut config = AppConfig::load_or_default(&cli.config)?;
     config.apply_cli_overrides(cli.verbose);
 
+    // Application-level default for the OTel service name
+    if config.opentelemetry.resource.service_name.is_none() {
+        config.opentelemetry.resource.service_name = Some("hyperspot".to_owned());
+    }
+
     // Build OpenTelemetry layer before logging
-    // Convert TracingConfig from modkit::bootstrap to modkit's type (they have identical structure)
     #[cfg(feature = "otel")]
-    let otel_layer = if config.tracing.enabled {
-        Some(modkit::telemetry::init::init_tracing(&config.tracing)?)
+    let otel_layer = if config.opentelemetry.tracing.enabled {
+        Some(modkit::telemetry::init::init_tracing(
+            &config.opentelemetry,
+        )?)
     } else {
         None
     };
@@ -90,18 +96,16 @@ async fn main() -> Result<()> {
     // Register custom panic hook to reroute panic backtrace into tracing.
     init_panic_tracing();
 
-    // Initialize OpenTelemetry metrics (if configured and enabled)
+    // Initialize OpenTelemetry metrics (or confirm noop when disabled)
     #[cfg(feature = "otel")]
-    if config.tracing.metrics.enabled
-        && let Err(e) = modkit::bootstrap::host::init_metrics_provider(&config.tracing)
-    {
+    if let Err(e) = modkit::telemetry::init::init_metrics_provider(&config.opentelemetry) {
         tracing::error!(error = %e, "OpenTelemetry metrics not initialized");
     }
 
     // One-time connectivity probe
     #[cfg(feature = "otel")]
-    if config.tracing.enabled
-        && let Err(e) = modkit::telemetry::init::otel_connectivity_probe(&config.tracing)
+    if config.opentelemetry.tracing.enabled
+        && let Err(e) = modkit::telemetry::init::otel_connectivity_probe(&config.opentelemetry)
     {
         tracing::error!(error = %e, "OTLP connectivity probe failed");
     }

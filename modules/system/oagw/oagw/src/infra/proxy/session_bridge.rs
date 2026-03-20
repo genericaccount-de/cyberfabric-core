@@ -40,14 +40,16 @@ fn url_path_and_query(url: &str) -> &str {
 ///
 /// - **`body = Some(bytes)`** (buffered path) — emits `Content-Length` and
 ///   appends the body after the blank line.
-/// - **`body = None`** (streaming path) — omits `Content-Length`; the caller
-///   writes body chunks afterward and signals the boundary by shutting down
-///   the write half (EOF), which is valid HTTP/1.1 framing for single-shot
-///   requests.
+/// - **`body = None`** (streaming path) — emits `Transfer-Encoding: chunked`;
+///   the caller writes each body piece in chunked encoding format and
+///   terminates with the final chunk `0\r\n\r\n`. The write half of the
+///   duplex must **not** be shut down — Pingora still needs the connection
+///   open to relay the upstream response.
 ///
 /// In both cases the function emits `Connection: close` (single-shot bridge,
-/// no keep-alive). Any inbound `Content-Length` or `Connection` values
-/// carried in `headers` are dropped to prevent duplicate framing headers.
+/// no keep-alive). Any inbound `Content-Length`, `Connection`, or
+/// `Transfer-Encoding` values carried in `headers` are stripped to prevent
+/// duplicate framing headers.
 pub(crate) fn serialize_request_wire(
     method: &Method,
     url: &str,
@@ -71,7 +73,10 @@ pub(crate) fn serialize_request_wire(
     let _ = write!(buf, "{} {} HTTP/1.1\r\n", method, pq);
     for (name, value) in headers {
         // Skip framing headers — authoritative values are appended below.
-        if name == http::header::CONTENT_LENGTH || name == http::header::CONNECTION {
+        if name == http::header::CONTENT_LENGTH
+            || name == http::header::CONNECTION
+            || name == http::header::TRANSFER_ENCODING
+        {
             continue;
         }
         buf.extend_from_slice(name.as_str().as_bytes());
@@ -80,9 +85,11 @@ pub(crate) fn serialize_request_wire(
         buf.extend_from_slice(b"\r\n");
     }
     // Include Content-Length only for the buffered path so Pingora knows
-    // the body boundary. The streaming path relies on EOF instead.
+    // the body boundary. The streaming path uses chunked transfer encoding.
     if let Some(b) = body {
         let _ = write!(buf, "Content-Length: {}\r\n", b.len());
+    } else {
+        buf.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
     }
     // Single-shot bridge — no keep-alive on the in-memory session.
     buf.extend_from_slice(b"Connection: close\r\n");
@@ -540,28 +547,55 @@ mod tests {
         assert!(text.contains("Connection: close\r\n"));
     }
 
+    #[test]
+    fn serialize_request_buffered_strips_transfer_encoding() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::TRANSFER_ENCODING,
+            HeaderValue::from_static("chunked"),
+        );
+        let body = Bytes::from_static(b"payload");
+        let wire = serialize_request_wire(
+            &Method::POST,
+            "https://example.com/api",
+            &headers,
+            Some(&body),
+        );
+        let text = String::from_utf8_lossy(&wire);
+        assert!(
+            !text.contains("Transfer-Encoding"),
+            "buffered path must not emit Transfer-Encoding"
+        );
+        assert!(text.contains("Content-Length: 7\r\n"));
+    }
+
     // -- serialize_request_wire tests (streaming: body = None) --
 
     #[test]
-    fn streaming_no_content_length() {
+    fn streaming_emits_chunked_te() {
         let mut headers = HeaderMap::new();
         headers.insert("upgrade", HeaderValue::from_static("websocket"));
         let wire = serialize_request_wire(&Method::GET, "wss://example.com/ws", &headers, None);
         let text = String::from_utf8_lossy(&wire);
         assert!(!text.contains("Content-Length"));
+        assert!(text.contains("Transfer-Encoding: chunked\r\n"));
         assert!(text.contains("upgrade: websocket\r\n"));
         assert!(text.contains("Connection: close\r\n"));
         assert!(wire.ends_with(b"\r\n\r\n"));
     }
 
     #[test]
-    fn streaming_no_duplicate_connection_or_content_length() {
+    fn streaming_no_duplicate_framing_headers() {
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::CONNECTION,
             HeaderValue::from_static("keep-alive"),
         );
         headers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("42"));
+        headers.insert(
+            http::header::TRANSFER_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
         let wire = serialize_request_wire(&Method::POST, "https://example.com/api", &headers, None);
         let text = String::from_utf8_lossy(&wire);
         assert_eq!(
@@ -574,6 +608,12 @@ mod tests {
             !text.contains("Content-Length"),
             "streaming path must not emit Content-Length"
         );
+        assert_eq!(
+            text.matches("Transfer-Encoding:").count(),
+            1,
+            "duplicate Transfer-Encoding"
+        );
+        assert!(text.contains("Transfer-Encoding: chunked\r\n"));
     }
 
     #[test]

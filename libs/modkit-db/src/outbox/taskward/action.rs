@@ -13,7 +13,7 @@ pub enum Directive<P = ()> {
     Proceed(P),
     /// No work — wait for any configured notifier (or cancellation if none).
     Idle(P),
-    /// Hard sleep — ignore notifiers entirely for this duration.
+    /// Soft sleep — listen for notifiers, wake early if notified before duration elapses.
     Sleep(Duration, P),
 }
 

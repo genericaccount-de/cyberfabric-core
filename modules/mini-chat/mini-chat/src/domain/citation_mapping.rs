@@ -5,19 +5,18 @@
 
 use std::collections::HashMap;
 
-use uuid::Uuid;
+use crate::domain::llm::{AttachmentRef, Citation, CitationSource};
 
-use crate::domain::llm::{Citation, CitationSource};
-
-/// Map provider `file_ids` in citations to internal attachment UUIDs.
+/// Map provider `file_ids` in citations to internal attachment UUIDs and filenames.
 ///
 /// - **Web citations**: pass through unchanged.
 /// - **File citations** with `attachment_id: None` (malformed): dropped with warning.
 /// - **File citations** with unknown `file_id` (not in map): dropped with warning.
-/// - **File citations** with known `file_id`: `attachment_id` replaced with UUID string.
+/// - **File citations** with known `file_id`: `attachment_id` replaced with UUID string,
+///   `title` replaced with the DB filename.
 pub fn map_citation_ids<S: ::std::hash::BuildHasher>(
     citations: Vec<Citation>,
-    provider_file_id_map: &HashMap<String, Uuid, S>,
+    provider_file_id_map: &HashMap<String, AttachmentRef, S>,
 ) -> Vec<Citation> {
     let total = citations.len();
     let mapped: Vec<Citation> = citations
@@ -26,11 +25,12 @@ pub fn map_citation_ids<S: ::std::hash::BuildHasher>(
             CitationSource::Web => Some(c),
             CitationSource::File => {
                 let file_id = if let Some(id) = &c.attachment_id { id.clone() } else {
-                    tracing::warn!("malformed file citation: attachment_id is None");
+                    tracing::warn!(title = %c.title, "malformed file citation: attachment_id is None");
                     return None;
                 };
-                if let Some(uuid) = provider_file_id_map.get(&file_id) {
-                    c.attachment_id = Some(uuid.to_string());
+                if let Some(att) = provider_file_id_map.get(&file_id) {
+                    c.attachment_id = Some(att.id.to_string());
+                    c.title.clone_from(&att.filename);
                     Some(c)
                 } else {
                     tracing::warn!(file_id = %file_id, "unmapped file_id in citation (soft-deleted or unknown)");
@@ -56,6 +56,7 @@ pub fn map_citation_ids<S: ::std::hash::BuildHasher>(
 mod tests {
     use super::*;
     use crate::domain::llm::TextSpan;
+    use uuid::Uuid;
 
     fn file_citation(file_id: Option<&str>) -> Citation {
         Citation {
@@ -84,15 +85,22 @@ mod tests {
     #[test]
     fn known_mapping() {
         let uuid = Uuid::nil();
-        let map = HashMap::from([("file-abc".into(), uuid)]);
+        let map = HashMap::from([(
+            "file-abc".into(),
+            AttachmentRef {
+                id: uuid,
+                filename: "report.pdf".into(),
+            },
+        )]);
         let result = map_citation_ids(vec![file_citation(Some("file-abc"))], &map);
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].attachment_id.as_deref(), Some(&*uuid.to_string()));
+        assert_eq!(result[0].title, "report.pdf");
     }
 
     #[test]
     fn unknown_dropped() {
-        let map = HashMap::new();
+        let map: HashMap<String, AttachmentRef> = HashMap::new();
         let result = map_citation_ids(vec![file_citation(Some("file-unknown"))], &map);
         assert!(result.is_empty());
     }
@@ -100,7 +108,13 @@ mod tests {
     #[test]
     fn soft_deleted_dropped() {
         // If file was soft-deleted, it's not in the map
-        let map = HashMap::from([("file-abc".into(), Uuid::nil())]);
+        let map = HashMap::from([(
+            "file-abc".into(),
+            AttachmentRef {
+                id: Uuid::nil(),
+                filename: "test.pdf".into(),
+            },
+        )]);
         let result = map_citation_ids(vec![file_citation(Some("file-other"))], &map);
         assert!(result.is_empty());
     }
@@ -115,13 +129,20 @@ mod tests {
 
     #[test]
     fn empty_map() {
-        let result = map_citation_ids(vec![file_citation(Some("file-x"))], &HashMap::new());
+        let map: HashMap<String, AttachmentRef> = HashMap::new();
+        let result = map_citation_ids(vec![file_citation(Some("file-x"))], &map);
         assert!(result.is_empty());
     }
 
     #[test]
     fn malformed_none_file_id() {
-        let map = HashMap::from([("file-abc".into(), Uuid::nil())]);
+        let map = HashMap::from([(
+            "file-abc".into(),
+            AttachmentRef {
+                id: Uuid::nil(),
+                filename: "test.pdf".into(),
+            },
+        )]);
         let result = map_citation_ids(vec![file_citation(None)], &map);
         assert!(result.is_empty());
     }
@@ -129,7 +150,13 @@ mod tests {
     #[test]
     fn mixed_citations_partial_mapping() {
         let uuid = Uuid::nil();
-        let map = HashMap::from([("file-known".into(), uuid)]);
+        let map = HashMap::from([(
+            "file-known".into(),
+            AttachmentRef {
+                id: uuid,
+                filename: "known.pdf".into(),
+            },
+        )]);
         let citations = vec![
             file_citation(Some("file-known")),
             file_citation(Some("file-unknown")),
@@ -140,6 +167,7 @@ mod tests {
         assert_eq!(result.len(), 2); // known file + web
         assert!(matches!(result[0].source, CitationSource::File));
         assert_eq!(result[0].attachment_id.as_deref(), Some(&*uuid.to_string()));
+        assert_eq!(result[0].title, "known.pdf");
         assert!(matches!(result[1].source, CitationSource::Web));
     }
 }

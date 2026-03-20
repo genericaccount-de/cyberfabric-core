@@ -9,6 +9,207 @@ release-plz updates this file in the Release PR.
 
 ## [Unreleased]
 
+## [0.1.13](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-tr-plugin-v0.1.12...cf-static-tr-plugin-v0.1.13) - 2026-03-19
+
+### Other
+
+- updated the following local packages: cf-modkit-security, cf-modkit-odata, cf-modkit-macros, cf-modkit, cf-tenant-resolver-sdk
+
+## [0.1.10](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-credstore-plugin-v0.1.9...cf-static-credstore-plugin-v0.1.10) - 2026-03-19
+
+### Other
+
+- updated the following local packages: cf-modkit-security, cf-modkit-macros, cf-modkit, cf-credstore-sdk
+
+## [0.1.12](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-authz-plugin-v0.1.11...cf-static-authz-plugin-v0.1.12) - 2026-03-19
+
+### Other
+
+- updated the following local packages: cf-modkit-security, cf-modkit-macros, cf-modkit, cf-authz-resolver-sdk
+
+## [0.2.3](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-authn-plugin-v0.2.2...cf-static-authn-plugin-v0.2.3) - 2026-03-19
+
+### Other
+
+- updated the following local packages: cf-modkit-security, cf-modkit-macros, cf-modkit, cf-authn-resolver-sdk
+
+## [0.1.14](https://github.com/cyberfabric/cyberfabric-core/compare/cf-single-tenant-tr-plugin-v0.1.13...cf-single-tenant-tr-plugin-v0.1.14) - 2026-03-19
+
+### Other
+
+- updated the following local packages: cf-modkit-security, cf-modkit-odata, cf-modkit-macros, cf-modkit, cf-tenant-resolver-sdk
+
+## [0.1.11](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-authz-plugin-v0.1.10...cf-static-authz-plugin-v0.1.11) - 2026-03-19
+
+### Other
+
+- updated the following local packages: cf-modkit-security, cf-modkit-macros, cf-modkit, cf-authz-resolver-sdk
+
+## [0.1.11](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-tr-plugin-v0.1.10...cf-static-tr-plugin-v0.1.11) - 2026-03-18
+
+### Other
+
+- release (by @github-actions[bot]) - #1135
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.8](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-credstore-plugin-v0.1.7...cf-static-credstore-plugin-v0.1.8) - 2026-03-18
+
+### Other
+
+- release (by @github-actions[bot]) - #1135
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.10](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-authz-plugin-v0.1.9...cf-static-authz-plugin-v0.1.10) - 2026-03-18
+
+### Other
+
+- release (by @github-actions[bot]) - #1135
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.1](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-authn-plugin-v0.2.0...cf-static-authn-plugin-v0.2.1) - 2026-03-18
+
+### Other
+
+- release (by @github-actions[bot]) - #1135
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.12](https://github.com/cyberfabric/cyberfabric-core/compare/cf-single-tenant-tr-plugin-v0.1.11...cf-single-tenant-tr-plugin-v0.1.12) - 2026-03-18
+
+### Other
+
+- release (by @github-actions[bot]) - #1135
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.5.8](https://github.com/cyberfabric/cyberfabric-core/compare/cf-modkit-v0.5.5...cf-modkit-v0.5.8) - 2026-03-18
+
+### Added
+
+- *(config)* add vendor configuration section to AppConfig (by @aviator5)
+
+### Fixed
+
+- *(modkit)* deserialize vendor config without cloning raw value (by @aviator5)
+- embed not maintained odata-params crate (by @lansfy) - #1120
+
+### Other
+
+- Merge pull request #831 from lizreu/fix/swallowed-errors-sse-ready-signal (by @MikeFalcon77) - #831
+
+### Contributors
+
+* @aviator5
+* @MikeFalcon77
+* @lansfy
+
+## [0.1.11](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-tr-plugin-v0.1.10...cf-static-tr-plugin-v0.1.11) - 2026-03-17
+
+### Other
+
+- updated the following local packages: cf-modkit-security, cf-modkit-odata, cf-modkit-macros, cf-modkit, cf-tenant-resolver-sdk
+
+## [0.1.8](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-credstore-plugin-v0.1.7...cf-static-credstore-plugin-v0.1.8) - 2026-03-17
+
+### Other
+
+- updated the following local packages: cf-modkit-security, cf-modkit-macros, cf-modkit, cf-credstore-sdk
+
+## [0.1.10](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-authz-plugin-v0.1.9...cf-static-authz-plugin-v0.1.10) - 2026-03-17
+
+### Other
+
+- updated the following local packages: cf-modkit-security, cf-modkit-macros, cf-modkit, cf-authz-resolver-sdk
+
+## [0.2.1](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-authn-plugin-v0.2.0...cf-static-authn-plugin-v0.2.1) - 2026-03-17
+
+### Other
+
+- updated the following local packages: cf-modkit-security, cf-modkit-macros, cf-modkit, cf-authn-resolver-sdk
+
+## [0.1.12](https://github.com/cyberfabric/cyberfabric-core/compare/cf-single-tenant-tr-plugin-v0.1.11...cf-single-tenant-tr-plugin-v0.1.12) - 2026-03-17
+
+### Other
+
+- updated the following local packages: cf-modkit-security, cf-modkit-odata, cf-modkit-macros, cf-modkit, cf-tenant-resolver-sdk
+
+## [0.1.10](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-tr-plugin-v0.1.9...cf-static-tr-plugin-v0.1.10) - 2026-03-14
+
+### Other
+
+- release (by @github-actions[bot]) - #1022
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.7](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-credstore-plugin-v0.1.6...cf-static-credstore-plugin-v0.1.7) - 2026-03-14
+
+### Other
+
+- release (by @github-actions[bot]) - #1022
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.1.9](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-authz-plugin-v0.1.8...cf-static-authz-plugin-v0.1.9) - 2026-03-14
+
+### Other
+
+- release (by @github-actions[bot]) - #1022
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.2.0](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-authn-plugin-v0.1.8...cf-static-authn-plugin-v0.2.0) - 2026-03-14
+
+### Added
+
+- *(mini-chat)* use S2S client credentials for OAGW upstream provisioning (by @aviator5)
+- *(authn-resolver)* add S2S authentication via OAuth2 client credentials (by @aviator5)
+
+### Other
+
+- chore(manual release) (by @MikeFalcon77) - #1043
+- release (by @github-actions[bot]) - #1022
+
+### Contributors
+
+* @MikeFalcon77
+* @github-actions[bot]
+* @aviator5
+
+## [0.1.11](https://github.com/cyberfabric/cyberfabric-core/compare/cf-single-tenant-tr-plugin-v0.1.10...cf-single-tenant-tr-plugin-v0.1.11) - 2026-03-14
+
+### Other
+
+- release (by @github-actions[bot]) - #1022
+
+### Contributors
+
+* @github-actions[bot]
+
+## [0.5.5](https://github.com/cyberfabric/cyberfabric-core/compare/cf-modkit-http-v0.5.4...cf-modkit-http-v0.5.5) - 2026-03-14
+
+### Other
+
+- update Cargo.toml dependencies
+
 ## [0.1.10](https://github.com/cyberfabric/cyberfabric-core/compare/cf-static-tr-plugin-v0.1.9...cf-static-tr-plugin-v0.1.10) - 2026-03-12
 
 ### Other

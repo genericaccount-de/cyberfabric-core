@@ -504,7 +504,7 @@ fn build_request_body<M>(request: &LlmRequest<M>, stream: bool) -> serde_json::V
                 debug!("FileSearch tool not supported by Chat Completions, dropping");
                 None
             }
-            LlmTool::WebSearch => {
+            LlmTool::WebSearch { .. } => {
                 debug!("WebSearch tool not supported by Chat Completions, dropping");
                 None
             }
@@ -1242,6 +1242,7 @@ mod tests {
             .tool(LlmTool::FileSearch {
                 vector_store_ids: vec!["vs-1".into()],
                 filters: None,
+                max_num_results: None,
             })
             .message(LlmMessage::user("Hi"))
             .build_streaming();

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
 use credstore_sdk::{
-    CredStoreError, CredStorePluginClientV1, SecretMetadata, SecretRef, SecretValue,
+    CredStoreError, CredStorePluginClientV1, OwnerId, SecretMetadata, SecretRef, SecretValue,
+    TenantId,
 };
 use modkit_security::SecurityContext;
 
@@ -20,12 +21,12 @@ impl CredStorePluginClientV1 for Service {
         // For Shared/Tenant entries the stored owner_id/owner_tenant_id are nil
         // placeholders — resolve them from the caller's security context.
         let owner_id = if entry.owner_id.is_nil() {
-            ctx.subject_id()
+            OwnerId(ctx.subject_id())
         } else {
             entry.owner_id
         };
         let owner_tenant_id = if entry.owner_tenant_id.is_nil() {
-            ctx.subject_tenant_id()
+            TenantId(ctx.subject_tenant_id())
         } else {
             entry.owner_tenant_id
         };
@@ -98,8 +99,8 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(metadata.value.as_bytes(), b"sk-test-123");
-        assert_eq!(metadata.owner_id, owner_a());
-        assert_eq!(metadata.owner_tenant_id, tenant_a());
+        assert_eq!(metadata.owner_id, OwnerId(owner_a()));
+        assert_eq!(metadata.owner_tenant_id, TenantId(tenant_a()));
     }
 
     #[tokio::test]
@@ -167,8 +168,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(metadata.value.as_bytes(), b"global-val");
-        assert_eq!(metadata.owner_id, owner_b());
-        assert_eq!(metadata.owner_tenant_id, tenant_a());
+        assert_eq!(metadata.owner_id, OwnerId(owner_b()));
+        assert_eq!(metadata.owner_tenant_id, TenantId(tenant_a()));
     }
 
     // --- Tenant secret fills owner from SecurityContext ---
@@ -195,8 +196,8 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert_eq!(metadata.owner_id, owner_b());
-        assert_eq!(metadata.owner_tenant_id, tenant_a());
+        assert_eq!(metadata.owner_id, OwnerId(owner_b()));
+        assert_eq!(metadata.owner_tenant_id, TenantId(tenant_a()));
     }
 
     // --- Lookup precedence via plugin ---
@@ -240,7 +241,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(meta.value.as_bytes(), b"private-val");
-        assert_eq!(meta.owner_id, owner_a());
+        assert_eq!(meta.owner_id, OwnerId(owner_a()));
 
         // owner_b in tenant_a → Tenant (owner resolved from ctx)
         let meta = plugin
@@ -249,7 +250,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(meta.value.as_bytes(), b"tenant-val");
-        assert_eq!(meta.owner_id, owner_b());
+        assert_eq!(meta.owner_id, OwnerId(owner_b()));
 
         // tenant_b → Shared (owner resolved from ctx)
         let meta = plugin
@@ -258,7 +259,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(meta.value.as_bytes(), b"shared-val");
-        assert_eq!(meta.owner_id, owner_b());
-        assert_eq!(meta.owner_tenant_id, tenant_b());
+        assert_eq!(meta.owner_id, OwnerId(owner_b()));
+        assert_eq!(meta.owner_tenant_id, TenantId(tenant_b()));
     }
 }

@@ -23,12 +23,17 @@ pub enum MiniChatAuditPluginError {
     /// Permanent failure — do not retry (schema mismatch, auth rejected).
     #[error("permanent audit plugin error: {0}")]
     Permanent(String),
+
+    /// The plugin emit future exceeded its deadline; treated as transient so
+    /// the outbox will retry the message on the next cycle.
+    #[error("audit plugin timed out")]
+    PluginTimeout,
 }
 
 impl MiniChatAuditPluginError {
     #[must_use]
     pub fn is_transient(&self) -> bool {
-        matches!(self, Self::Transient(_))
+        matches!(self, Self::Transient(_) | Self::PluginTimeout)
     }
 
     #[must_use]

@@ -29,19 +29,37 @@ pub struct HttpMetrics {
 
 impl HttpMetrics {
     /// Create instruments on the global meter scoped to the given module name.
+    ///
+    /// When `prefix` is non-empty the metric names become
+    /// `{prefix}.http.server.request.duration` and
+    /// `{prefix}.http.server.active_requests`.
     #[must_use]
-    pub fn new(module_name: &str) -> Self {
+    pub fn new(module_name: &str, prefix: &str) -> Self {
+        let prefix = prefix.trim().trim_end_matches('.'); // Normalize prefix.
+
         let scope = opentelemetry::InstrumentationScope::builder(module_name.to_owned()).build();
         let meter = opentelemetry::global::meter_with_scope(scope);
 
+        let (duration_name, active_name) = if prefix.is_empty() {
+            (
+                "http.server.request.duration".to_owned(),
+                "http.server.active_requests".to_owned(),
+            )
+        } else {
+            (
+                format!("{prefix}.http.server.request.duration"),
+                format!("{prefix}.http.server.active_requests"),
+            )
+        };
+
         let duration = meter
-            .f64_histogram("http.server.request.duration")
+            .f64_histogram(duration_name)
             .with_description("Duration of HTTP server requests")
             .with_unit("s")
             .build();
 
         let active_requests = meter
-            .i64_up_down_counter("http.server.active_requests")
+            .i64_up_down_counter(active_name)
             .with_description("Number of active HTTP server requests")
             .build();
 

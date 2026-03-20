@@ -151,16 +151,14 @@ async fn create_incoming(
                 "CREATE TABLE IF NOT EXISTS modkit_outbox_incoming (
                 id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 partition_id BIGINT   NOT NULL REFERENCES modkit_outbox_partitions(id),
-                body_id      BIGINT   NOT NULL REFERENCES modkit_outbox_body(id),
-                created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+                body_id      BIGINT   NOT NULL REFERENCES modkit_outbox_body(id)
             )"
             }
             DatabaseBackend::Sqlite => {
                 "CREATE TABLE IF NOT EXISTS modkit_outbox_incoming (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
                 partition_id INTEGER NOT NULL REFERENCES modkit_outbox_partitions(id),
-                body_id      INTEGER NOT NULL REFERENCES modkit_outbox_body(id),
-                created_at   TEXT    NOT NULL DEFAULT (datetime('now'))
+                body_id      INTEGER NOT NULL REFERENCES modkit_outbox_body(id)
             )"
             }
             DatabaseBackend::MySql => {
@@ -168,7 +166,6 @@ async fn create_incoming(
                 id           BIGINT AUTO_INCREMENT PRIMARY KEY,
                 partition_id BIGINT NOT NULL,
                 body_id      BIGINT NOT NULL,
-                created_at   TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
                 FOREIGN KEY (partition_id) REFERENCES modkit_outbox_partitions(id),
                 FOREIGN KEY (body_id) REFERENCES modkit_outbox_body(id)
             )"
@@ -216,7 +213,6 @@ async fn create_outgoing(
                 partition_id BIGINT NOT NULL REFERENCES modkit_outbox_partitions(id),
                 body_id      BIGINT NOT NULL REFERENCES modkit_outbox_body(id),
                 seq          BIGINT NOT NULL,
-                created_at   TIMESTAMPTZ NOT NULL,
                 sequenced_at TIMESTAMPTZ NOT NULL DEFAULT now()
             )"
             }
@@ -226,7 +222,6 @@ async fn create_outgoing(
                 partition_id INTEGER NOT NULL REFERENCES modkit_outbox_partitions(id),
                 body_id      INTEGER NOT NULL REFERENCES modkit_outbox_body(id),
                 seq          INTEGER NOT NULL,
-                created_at   TEXT    NOT NULL,
                 sequenced_at TEXT    NOT NULL DEFAULT (datetime('now'))
             )"
             }
@@ -236,7 +231,6 @@ async fn create_outgoing(
                 partition_id BIGINT NOT NULL,
                 body_id      BIGINT NOT NULL,
                 seq          BIGINT NOT NULL,
-                created_at   TIMESTAMP(6) NOT NULL,
                 sequenced_at TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
                 FOREIGN KEY (partition_id) REFERENCES modkit_outbox_partitions(id),
                 FOREIGN KEY (body_id) REFERENCES modkit_outbox_body(id)

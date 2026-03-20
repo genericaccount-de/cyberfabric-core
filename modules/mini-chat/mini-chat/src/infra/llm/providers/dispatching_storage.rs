@@ -44,7 +44,7 @@ impl FileStorageProvider for DispatchingFileStorage {
         ctx: SecurityContext,
         provider_id: &str,
         params: UploadFileParams,
-    ) -> Result<String, FileStorageError> {
+    ) -> Result<(String, u64), FileStorageError> {
         self.get(provider_id)?
             .upload_file(ctx, provider_id, params)
             .await

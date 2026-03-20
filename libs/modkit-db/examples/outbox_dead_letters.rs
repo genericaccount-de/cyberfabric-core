@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use modkit_db::outbox::{
     DeadLetterFilter, DeadLetterScope, HandlerResult, MessageHandler, Outbox, OutboxMessage,
-    Partitions, outbox_migrations,
+    Partitions, WorkerTuning, outbox_migrations,
 };
 use modkit_db::{ConnectOpts, connect_db, migration_runner::run_migrations_for_testing};
 
@@ -42,7 +42,12 @@ async fn main() -> anyhow::Result<()> {
 
     // Reject 3 messages to populate dead letters
     let h1 = Outbox::builder(db.clone())
-        .poll_interval(Duration::from_millis(50))
+        .processor_tuning(
+            WorkerTuning::processor_default().idle_interval(Duration::from_millis(50)),
+        )
+        .sequencer_tuning(
+            WorkerTuning::sequencer_default().idle_interval(Duration::from_millis(50)),
+        )
         .queue("events", Partitions::of(1))
         .decoupled(RejectAll)
         .start()

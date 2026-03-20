@@ -80,10 +80,13 @@ pub struct ModelCatalogEntry {
     pub estimation_budgets: EstimationBudgets,
     /// Top-k chunks returned by similarity search per `file_search` call.
     pub max_retrieved_chunks_per_turn: u32,
+    /// Maximum tool calls the provider may make per request.
+    #[serde(default = "default_max_tool_calls")]
+    pub max_tool_calls: u32,
     /// Full general config captured at snapshot time.
     pub general_config: ModelGeneralConfig,
     /// Tenant preference settings captured at snapshot time.
-    pub preference: ModelPreference,
+    pub preference: Option<ModelPreference>,
     /// System prompt sent as `instructions` in every LLM request for this model.
     /// Empty string = no system instructions.
     #[serde(default)]
@@ -125,6 +128,10 @@ impl Default for EstimationBudgets {
             minimal_generation_floor: 50,
         }
     }
+}
+
+fn default_max_tool_calls() -> u32 {
+    2
 }
 
 /// LLM API inference parameters (API: `PolicyModelApiParams`).
@@ -213,8 +220,6 @@ pub struct ModelGeneralConfig {
     /// CTI type identifier of the config.
     #[serde(rename = "type")]
     pub config_type: String,
-    /// Model tier CTI identifier.
-    pub tier: String,
     #[serde(with = "time::serde::rfc3339")]
     pub available_from: OffsetDateTime,
     pub max_file_size_mb: u32,
@@ -363,11 +368,12 @@ mod tests {
             multiplier_display: "1x".to_owned(),
             estimation_budgets: EstimationBudgets::default(),
             max_retrieved_chunks_per_turn: 5,
+            max_tool_calls: 2,
             general_config: sample_general_config(),
-            preference: ModelPreference {
+            preference: Some(ModelPreference {
                 is_default: false,
                 sort_order: 0,
-            },
+            }),
             system_prompt: String::new(),
             thread_summary_prompt: String::new(),
         }
@@ -376,7 +382,6 @@ mod tests {
     fn sample_general_config() -> ModelGeneralConfig {
         ModelGeneralConfig {
             config_type: "model.general.v1".to_owned(),
-            tier: "premium".to_owned(),
             available_from: OffsetDateTime::UNIX_EPOCH,
             max_file_size_mb: 25,
             api_params: ModelApiParams {
@@ -457,7 +462,6 @@ mod tests {
         let deserialized: ModelGeneralConfig = serde_json::from_value(json).unwrap();
 
         assert_eq!(deserialized.config_type, original.config_type);
-        assert_eq!(deserialized.tier, original.tier);
     }
 
     // ── ModelCatalogEntry: optional fields default when absent ──
@@ -477,12 +481,14 @@ mod tests {
         obj.remove("estimation_budgets");
         obj.remove("system_prompt");
         obj.remove("thread_summary_prompt");
+        obj.remove("preference");
 
         let entry: ModelCatalogEntry = serde_json::from_value(json).unwrap();
         assert!(entry.description.is_empty());
         assert!(entry.version.is_empty());
         assert!(entry.icon.is_empty());
         assert!(!entry.enabled);
+        assert!(entry.preference.is_none());
         assert!(entry.multimodal_capabilities.is_empty());
         assert!(entry.multiplier_display.is_empty());
         assert_eq!(

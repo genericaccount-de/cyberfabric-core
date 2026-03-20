@@ -3,7 +3,6 @@ pub mod error;
 pub mod gts;
 pub mod models;
 pub mod plugin_api;
-
 pub use audit_models::{
     AttachmentKind, AttachmentMetadata, AuditUsageTokens, LatencyMs, LicenseDecision,
     PolicyDecisions, QuotaDecision, QuotaScope, RequesterType, ToolCalls, TurnAuditEvent,

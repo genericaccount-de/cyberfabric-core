@@ -1,5 +1,47 @@
 # Technical Design — CredStore
 
+
+<!-- toc -->
+
+- [1. Architecture Overview](#1-architecture-overview)
+  - [1.1 Architectural Vision](#11-architectural-vision)
+  - [1.2 Architecture Drivers](#12-architecture-drivers)
+  - [1.3 Architecture Layers](#13-architecture-layers)
+- [2. Goals / Non-Goals](#2-goals--non-goals)
+  - [2.1 Goals](#21-goals)
+  - [2.2 Non-Goals](#22-non-goals)
+- [3. Principles & Constraints](#3-principles--constraints)
+  - [3.1 Design Principles](#31-design-principles)
+  - [3.2 Constraints](#32-constraints)
+- [4. Technical Architecture](#4-technical-architecture)
+  - [4.1 Domain Model](#41-domain-model)
+  - [4.2 Component Model](#42-component-model)
+  - [4.3 API Contracts](#43-api-contracts)
+  - [4.4 External Interfaces & Protocols](#44-external-interfaces--protocols)
+  - [4.5 Service-to-Service Pattern](#45-service-to-service-pattern)
+  - [4.6 Interactions & Sequences](#46-interactions--sequences)
+  - [4.7 Database schemas & tables](#47-database-schemas--tables)
+  - [4.8 Deployment Topology](#48-deployment-topology)
+  - [4.9 Technology Stack](#49-technology-stack)
+- [5. Risks / Trade-offs](#5-risks--trade-offs)
+  - [5.1 Architectural Trade-offs](#51-architectural-trade-offs)
+  - [5.2 Security and Performance Risks](#52-security-and-performance-risks)
+- [6. Migration Plan](#6-migration-plan)
+  - [6.1 Schema Migration: Two-Mode to Three-Mode Sharing](#61-schema-migration-two-mode-to-three-mode-sharing)
+  - [6.2 Backward Compatibility](#62-backward-compatibility)
+  - [6.3 Rollback Plan](#63-rollback-plan)
+  - [6.4 Success Criteria](#64-success-criteria)
+- [7. Open Questions](#7-open-questions)
+  - [7.1 From PRD (Cross-Reference)](#71-from-prd-cross-reference)
+  - [7.2 Design-Specific Questions](#72-design-specific-questions)
+- [8. Additional context](#8-additional-context)
+  - [Plugin Registration](#plugin-registration)
+  - [Configuration](#configuration)
+  - [Error Mapping](#error-mapping)
+- [9. Traceability](#9-traceability)
+
+<!-- /toc -->
+
 <!--
 =============================================================================
 TECHNICAL DESIGN DOCUMENT

@@ -218,6 +218,7 @@ modules:
             web_search_surcharge_tokens: 500
             minimal_generation_floor: 50
           max_retrieved_chunks_per_turn: 5
+          max_tool_calls: 2
           general_config:
             type: ""
             tier: "premium"
@@ -303,6 +304,7 @@ modules:
             web_search_surcharge_tokens: 500
             minimal_generation_floor: 50
           max_retrieved_chunks_per_turn: 5
+          max_tool_calls: 2
           general_config:
             type: ""
             tier: "standard"
@@ -360,5 +362,9 @@ modules:
             is_default: false
             sort_order: 1
 
-tracing:
-  enabled: false
+# OpenTelemetry configuration (resource identity, tracing, metrics)
+opentelemetry:
+  tracing:
+    enabled: false
+  metrics:
+    enabled: false

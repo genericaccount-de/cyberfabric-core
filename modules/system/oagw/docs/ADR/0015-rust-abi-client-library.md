@@ -6,6 +6,65 @@ decision-makers: OAGW Team
 
 # Rust ABI Client Library — Hybrid Deployment Abstraction with SDK Integration
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Core API](#core-api)
+  - [Deployment Modes](#deployment-modes)
+  - [Response Consumption](#response-consumption)
+  - [SDK Integration Strategy](#sdk-integration-strategy)
+  - [Build Script Strategy](#build-script-strategy)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Trait-based abstraction with dynamic dispatch](#trait-based-abstraction-with-dynamic-dispatch)
+  - [Concrete types with feature flags](#concrete-types-with-feature-flags)
+  - [Hybrid approach with deployment abstraction](#hybrid-approach-with-deployment-abstraction)
+- [More Information](#more-information)
+- [SDK Integration Patterns](#sdk-integration-patterns)
+  - [Pattern 1: Drop-In Replacement for reqwest](#pattern-1-drop-in-replacement-for-reqwest)
+  - [Pattern 2: HTTP Proxy (Standard Proxy Protocol)](#pattern-2-http-proxy-standard-proxy-protocol)
+  - [Pattern 3: Custom HTTP Transport Trait](#pattern-3-custom-http-transport-trait)
+  - [Pattern 4: Wrapper Layer (Facade Pattern)](#pattern-4-wrapper-layer-facade-pattern)
+  - [Pattern 5: reqwest Middleware/Interceptor](#pattern-5-reqwest-middlewareinterceptor)
+  - [Recommended Strategy](#recommended-strategy)
+- [HTTP Client Compatibility Analysis](#http-client-compatibility-analysis)
+  - [Rust HTTP Client Landscape](#rust-http-client-landscape)
+  - [Compatibility Matrix](#compatibility-matrix)
+  - [Key Compatibility Issues](#key-compatibility-issues)
+  - [Solutions and Mitigations](#solutions-and-mitigations)
+  - [Build Script Strategy](#build-script-strategy-1)
+- [Detailed Design](#detailed-design)
+  - [Usage Example (Deployment-Agnostic)](#usage-example-deployment-agnostic)
+  - [Core Types](#core-types)
+  - [Client Implementations](#client-implementations)
+  - [Out of Scope: OAGW Plugin Development](#out-of-scope-oagw-plugin-development)
+  - [WebTransport Support (Future)](#webtransport-support-future)
+- [Implementation Plan](#implementation-plan)
+  - [Phase 0 (MVP): Core Client Types & RemoteProxyClient](#phase-0-mvp-core-client-types--remoteproxyclient)
+  - [Phase 1: SharedProcessClient](#phase-1-sharedprocessclient)
+  - [Phase 2: WebSocket Support](#phase-2-websocket-support)
+  - [Phase 3: SDK HTTP Proxy, WebTransport & gRPC](#phase-3-sdk-http-proxy-webtransport--grpc)
+- [Testing Strategy](#testing-strategy)
+  - [Unit Tests](#unit-tests)
+  - [Mock Client for Testing](#mock-client-for-testing)
+- [Dependencies](#dependencies)
+- [Security Considerations](#security-considerations)
+- [Performance Considerations](#performance-considerations)
+- [Alternatives Considered](#alternatives-considered)
+  - [Alternative 1: Use `hyper` Directly](#alternative-1-use-hyper-directly)
+  - [Alternative 2: Custom HTTP Client Implementation](#alternative-2-custom-http-client-implementation)
+  - [Alternative 3: Single Monolithic Client Type](#alternative-3-single-monolithic-client-type)
+- [Related ADRs](#related-adrs)
+- [References](#references)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-rust-abi-client-library`
 
 ## Context and Problem Statement

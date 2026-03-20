@@ -186,6 +186,7 @@ pub struct TurnMutationAuditEvent {
 
     pub actor_user_id: Uuid,
     pub chat_id: Uuid,
+    pub turn_id: Uuid,
     pub original_request_id: Uuid,
     pub new_request_id: Uuid,
 }
@@ -201,6 +202,7 @@ impl TurnMutationAuditEvent {
         trace_id: Option<String>,
         actor_user_id: Uuid,
         chat_id: Uuid,
+        turn_id: Uuid,
         original_request_id: Uuid,
         new_request_id: Uuid,
     ) -> Self {
@@ -212,6 +214,7 @@ impl TurnMutationAuditEvent {
             trace_id,
             actor_user_id,
             chat_id,
+            turn_id,
             original_request_id,
             new_request_id,
         }
@@ -227,6 +230,7 @@ impl TurnMutationAuditEvent {
         trace_id: Option<String>,
         actor_user_id: Uuid,
         chat_id: Uuid,
+        turn_id: Uuid,
         original_request_id: Uuid,
         new_request_id: Uuid,
     ) -> Self {
@@ -238,6 +242,7 @@ impl TurnMutationAuditEvent {
             trace_id,
             actor_user_id,
             chat_id,
+            turn_id,
             original_request_id,
             new_request_id,
         }
@@ -279,5 +284,6 @@ pub struct TurnDeleteAuditEvent {
 
     pub actor_user_id: Uuid,
     pub chat_id: Uuid,
+    pub turn_id: Uuid,
     pub request_id: Uuid,
 }

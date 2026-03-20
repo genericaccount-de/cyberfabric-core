@@ -1,7 +1,7 @@
 [package]
 name = "cf-mini-chat"
 description = "Mini-chat module: multi-tenant AI chat"
-version = "0.1.14"
+version = "0.1.20"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -22,7 +22,7 @@ workspace = true
 mini-chat-sdk = { workspace = true }
 
 # AuthN resolver for S2S client credentials exchange
-authn-resolver-sdk = { package = "cf-authn-resolver-sdk", version = "0.3.1", path = "../../system/authn-resolver/authn-resolver-sdk" }
+authn-resolver-sdk = { package = "cf-authn-resolver-sdk", version = "0.3.5", path = "../../system/authn-resolver/authn-resolver-sdk" }
 
 # AuthZ resolver for authorization (PEP flow)
 authz-resolver-sdk = { workspace = true }
@@ -38,6 +38,7 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 inventory = { workspace = true }
 
 # Streaming / async utilities
@@ -46,6 +47,7 @@ pin-project-lite = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }
 regex = { workspace = true }
+multer = "3.1"
 
 # Encoding
 base64 = { workspace = true }
@@ -72,6 +74,9 @@ sea-orm-migration = { workspace = true }
 # Error handling
 thiserror = { workspace = true }
 
+# Metrics / OpenTelemetry
+opentelemetry = { workspace = true }
+
 # Local dependencies
 modkit = { workspace = true }
 modkit-db = { workspace = true, features = ["sqlite", "pg", "preview-outbox"] }
@@ -79,8 +84,11 @@ modkit-db-macros = { workspace = true }
 modkit-security = { workspace = true }
 modkit-macros = { workspace = true }
 modkit-odata = { workspace = true, features = ["with-utoipa"] }
+modkit-utils = { workspace = true }
+heck = { workspace = true }
 secrecy = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }
+opentelemetry_sdk = { workspace = true, features = ["testing"] }
 

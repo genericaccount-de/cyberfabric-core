@@ -1,5 +1,35 @@
 # Feature: Core Domain & Storage Foundation
 
+
+<!-- toc -->
+
+- [1. Feature Context](#1-feature-context)
+  - [1.1 Overview](#11-overview)
+  - [1.2 Purpose](#12-purpose)
+  - [1.3 Actors](#13-actors)
+  - [1.4 References](#14-references)
+  - [1.5 Out of Scope](#15-out-of-scope)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
+  - [Module Bootstrap Flow](#module-bootstrap-flow)
+  - [GTS Type Provisioning Flow](#gts-type-provisioning-flow)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
+  - [Database Migration Execution](#database-migration-execution)
+  - [Domain Model Validation](#domain-model-validation)
+  - [SDK Trait Definition](#sdk-trait-definition)
+- [4. States (CDSL)](#4-states-cdsl)
+- [5. Definitions of Done](#5-definitions-of-done)
+  - [Implement Domain Entities](#implement-domain-entities)
+  - [Implement Database Schema & Migrations](#implement-database-schema--migrations)
+  - [Implement SeaORM Entities](#implement-seaorm-entities)
+  - [Implement SDK Crate](#implement-sdk-crate)
+  - [Implement ModKit Module Wiring](#implement-modkit-module-wiring)
+  - [Implement GTS Type Provisioning](#implement-gts-type-provisioning)
+  - [Implement DDD-Light Layering](#implement-ddd-light-layering)
+- [6. Acceptance Criteria](#6-acceptance-criteria)
+- [7. Non-Applicable Concerns](#7-non-applicable-concerns)
+
+<!-- /toc -->
+
 - [ ] `p1` - **ID**: `cpt-cf-oagw-featstatus-domain-foundation-implemented`
 
 <!-- reference to DECOMPOSITION entry -->

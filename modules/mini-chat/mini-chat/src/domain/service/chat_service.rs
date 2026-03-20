@@ -115,18 +115,19 @@ impl<CR: ChatRepository + 'static, TSR: ThreadSummaryRepository + 'static> ChatS
 
         let conn = self.db.conn().map_err(DomainError::from)?;
 
-        let scope = self
+        let chat_scope = self
             .enforcer
             .access_scope(ctx, &resources::CHAT, actions::READ, Some(id))
-            .await?;
+            .await?
+            .ensure_owner(ctx.subject_id());
 
         let chat = self
             .chat_repo
-            .get(&conn, &scope, id)
+            .get(&conn, &chat_scope, id)
             .await?
             .ok_or_else(|| DomainError::chat_not_found(id))?;
 
-        let msg_scope = scope.tenant_only();
+        let msg_scope = chat_scope.tenant_only();
         let message_count = self.chat_repo.count_messages(&conn, &msg_scope, id).await?;
 
         tracing::debug!("Successfully retrieved chat");
@@ -144,15 +145,16 @@ impl<CR: ChatRepository + 'static, TSR: ThreadSummaryRepository + 'static> ChatS
 
         let conn = self.db.conn().map_err(DomainError::from)?;
 
-        let scope = self
+        let chat_scope = self
             .enforcer
             .access_scope(ctx, &resources::CHAT, actions::LIST, None)
-            .await?;
+            .await?
+            .ensure_owner(ctx.subject_id());
 
-        let page = self.chat_repo.list_page(&conn, &scope, query).await?;
+        let page = self.chat_repo.list_page(&conn, &chat_scope, query).await?;
 
         // Batch count: single GROUP BY query for all chat IDs.
-        let msg_scope = scope.tenant_only();
+        let msg_scope = chat_scope.tenant_only();
         let chat_ids: Vec<Uuid> = page.items.iter().map(|c| c.id).collect();
         let counts = if chat_ids.is_empty() {
             std::collections::HashMap::new()
@@ -193,16 +195,17 @@ impl<CR: ChatRepository + 'static, TSR: ThreadSummaryRepository + 'static> ChatS
             validate_title(Some(title.as_str()))?;
         }
 
-        let scope = self
+        let chat_scope = self
             .enforcer
             .access_scope(ctx, &resources::CHAT, actions::UPDATE, Some(id))
-            .await?;
+            .await?
+            .ensure_owner(ctx.subject_id());
 
         let chat_repo = Arc::clone(&self.chat_repo);
         let (updated, message_count) = self
             .db
             .transaction(|tx| {
-                let scope = scope.clone();
+                let scope = chat_scope.clone();
                 Box::pin(async move {
                     let map = |e: DomainError| modkit_db::DbError::Other(anyhow::Error::new(e));
 
@@ -248,12 +251,13 @@ impl<CR: ChatRepository + 'static, TSR: ThreadSummaryRepository + 'static> ChatS
 
         let conn = self.db.conn().map_err(DomainError::from)?;
 
-        let scope = self
+        let chat_scope = self
             .enforcer
             .access_scope(ctx, &resources::CHAT, actions::DELETE, Some(id))
-            .await?;
+            .await?
+            .ensure_owner(ctx.subject_id());
 
-        let deleted = self.chat_repo.soft_delete(&conn, &scope, id).await?;
+        let deleted = self.chat_repo.soft_delete(&conn, &chat_scope, id).await?;
         if !deleted {
             return Err(DomainError::chat_not_found(id));
         }

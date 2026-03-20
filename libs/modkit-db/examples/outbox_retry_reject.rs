@@ -3,7 +3,6 @@
 //! Retry with exponential backoff, then dead-letter on permanent failure.
 //!
 //! The handler retries twice (transient failure), then rejects on the 3rd attempt.
-//! Backoff is configured fast (100ms base) so the demo completes quickly.
 //!
 //! Run:
 //!   cargo run -p cf-modkit-db --example `outbox_retry_reject` --features sqlite,preview-outbox
@@ -12,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use modkit_db::outbox::{
     DeadLetterFilter, HandlerResult, MessageHandler, Outbox, OutboxMessage, Partitions,
-    outbox_migrations,
+    WorkerTuning, outbox_migrations,
 };
 use modkit_db::{ConnectOpts, connect_db, migration_runner::run_migrations_for_testing};
 
@@ -58,11 +57,13 @@ async fn main() -> anyhow::Result<()> {
     run_migrations_for_testing(&db, outbox_migrations()).await?;
 
     let handle = Outbox::builder(db.clone())
-        .poll_interval(Duration::from_millis(50))
+        .processor_tuning(
+            WorkerTuning::processor_default().idle_interval(Duration::from_millis(50)),
+        )
+        .sequencer_tuning(
+            WorkerTuning::sequencer_default().idle_interval(Duration::from_millis(50)),
+        )
         .queue("events", Partitions::of(1))
-        // fast backoff for demo — production would use default 1s base / 60s max
-        .backoff_base(Duration::from_millis(100))
-        .backoff_max(Duration::from_millis(500))
         .decoupled(RetryThenReject {
             start: Instant::now(),
         })

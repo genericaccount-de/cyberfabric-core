@@ -1,5 +1,22 @@
 # Decomposition: Outbound API Gateway (OAGW)
 
+
+<!-- toc -->
+
+- [1. Overview](#1-overview)
+- [2. Entries](#2-entries)
+  - [1. Core Domain & Storage Foundation - HIGH](#1-core-domain--storage-foundation---high)
+  - [2. Upstream & Route Management - HIGH](#2-upstream--route-management---high)
+  - [3. Plugin System - HIGH](#3-plugin-system---high)
+  - [4. HTTP Proxy Engine - HIGH](#4-http-proxy-engine---high)
+  - [5. Multi-Tenant Configuration Hierarchy - MEDIUM](#5-multi-tenant-configuration-hierarchy---medium)
+  - [6. Rate Limiting & Resilience - MEDIUM](#6-rate-limiting--resilience---medium)
+  - [7. Streaming & Protocol Support - MEDIUM](#7-streaming--protocol-support---medium)
+  - [8. Observability & Security Hardening - MEDIUM](#8-observability--security-hardening---medium)
+- [3. Feature Dependencies](#3-feature-dependencies)
+
+<!-- /toc -->
+
 **Overall implementation status:**
 - [ ] `p1` - **ID**: `cpt-cf-oagw-status-overall`
 

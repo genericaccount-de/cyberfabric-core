@@ -8,9 +8,9 @@ use crate::config::{ProviderEntry, RagConfig, StorageKind};
 use crate::domain::repos::VectorStoreRepository as VectorStoreRepoTrait;
 use crate::domain::service::test_helpers::{
     MockModelResolver, MockOagwGateway, NoopOutboxEnqueuer, RecordingOutboxEnqueuer,
-    TestCatalogEntryParams, inmem_db, insert_chat_for_user, insert_chat_with_model,
-    insert_test_message, mock_db_provider, mock_model_resolver, mock_tenant_only_enforcer,
-    test_catalog_entry,
+    TestCatalogEntryParams, bytes_to_stream, inmem_db, insert_chat_for_user,
+    insert_chat_with_model, insert_test_message, mock_db_provider, mock_model_resolver,
+    mock_tenant_only_enforcer, test_catalog_entry,
 };
 use crate::infra::db::repo::{
     chat_repo::ChatRepository as OrmChatRepository,
@@ -40,6 +40,8 @@ fn test_provider_resolver(
             kind: ProviderKind::OpenAiResponses,
             upstream_alias: Some("test-host".to_owned()),
             host: "test-host".to_owned(),
+            port: None,
+            use_http: false,
             api_path: "/v1/responses".to_owned(),
             auth_plugin_type: None,
             auth_config: None,
@@ -95,6 +97,54 @@ fn build_service(
         provider_resolver,
         mock_model_resolver(),
         rag_config,
+        Arc::new(crate::domain::ports::metrics::NoopMetrics),
+    )
+}
+
+/// Build an `AttachmentService` with a custom metrics implementation.
+fn build_service_with_metrics(
+    db: modkit_db::Db,
+    oagw: Arc<dyn oagw_sdk::ServiceGatewayClientV1>,
+    outbox: Arc<dyn crate::domain::repos::OutboxEnqueuer>,
+    rag_config: RagConfig,
+    metrics: Arc<dyn crate::domain::ports::MiniChatMetricsPort>,
+) -> TestAttachmentService {
+    let db = mock_db_provider(db);
+    let chat_repo = Arc::new(OrmChatRepository::new(modkit_db::odata::LimitCfg {
+        default: 20,
+        max: 100,
+    }));
+    let attachment_repo = Arc::new(OrmAttachmentRepository);
+    let vector_store_repo = Arc::new(OrmVectorStoreRepository);
+    let provider_resolver = test_provider_resolver(&(Arc::clone(&oagw) as _));
+    let rag_client =
+        Arc::new(crate::infra::llm::providers::rag_http_client::RagHttpClient::new(oagw));
+    let file_storage: Arc<dyn crate::domain::ports::FileStorageProvider> = Arc::new(
+        crate::infra::llm::providers::openai_file_storage::OpenAiFileStorage::new(
+            Arc::clone(&rag_client),
+            Arc::clone(&provider_resolver),
+        ),
+    );
+    let vector_store_prov: Arc<dyn crate::domain::ports::VectorStoreProvider> = Arc::new(
+        crate::infra::llm::providers::openai_vector_store::OpenAiVectorStore::new(
+            rag_client,
+            Arc::clone(&provider_resolver),
+        ),
+    );
+
+    AttachmentService::new(
+        db,
+        attachment_repo,
+        chat_repo,
+        vector_store_repo,
+        outbox,
+        mock_tenant_only_enforcer(),
+        file_storage,
+        vector_store_prov,
+        provider_resolver,
+        mock_model_resolver(),
+        rag_config,
+        metrics,
     )
 }
 
@@ -111,6 +161,53 @@ fn vector_store_create_response(vs_id: &str) -> serde_json::Value {
 /// Helper: JSON response for adding a file to a vector store.
 fn vector_store_add_file_response() -> serde_json::Value {
     serde_json::json!({ "id": "vsf-abc123", "status": "in_progress" })
+}
+
+/// Test helper: wraps the new streaming `upload_file` with the old simple interface.
+///
+/// Calls `get_upload_context`, validates MIME, converts bytes to stream, and
+/// calls `upload_file` with the full parameter set.
+async fn test_upload_file(
+    svc: &TestAttachmentService,
+    ctx: &modkit_security::SecurityContext,
+    chat_id: Uuid,
+    filename: &str,
+    content_type: &str,
+    data: Bytes,
+) -> Result<crate::infra::db::entity::attachment::Model, crate::domain::error::DomainError> {
+    use crate::domain::mime_validation::{
+        infer_mime_from_extension, normalize_mime, remap_csv_to_plain, validate_mime,
+    };
+    // Resolve upload context (authz + limits)
+    let upload_ctx = svc.get_upload_context(ctx, chat_id).await?;
+
+    // MIME validation (mirrors what the handler does)
+    let effective_ct = if normalize_mime(content_type) == "application/octet-stream" {
+        infer_mime_from_extension(filename).unwrap_or(content_type)
+    } else {
+        content_type
+    };
+    let effective_ct = if upload_ctx.allow_csv_upload {
+        remap_csv_to_plain(effective_ct).unwrap_or(effective_ct)
+    } else {
+        effective_ct
+    };
+    let validated = validate_mime(effective_ct)?;
+
+    let size = data.len() as u64;
+    let stream = bytes_to_stream(data);
+
+    svc.upload_file(
+        ctx,
+        chat_id,
+        upload_ctx,
+        filename.to_owned(),
+        validated.mime,
+        validated.kind,
+        stream,
+        Some(size),
+    )
+    .await
 }
 
 // ── P5-B1: Upload document full lifecycle ──
@@ -136,15 +233,15 @@ async fn test_upload_document_full_lifecycle() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "report.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 1024]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "report.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 1024]),
+    )
+    .await;
 
     assert!(result.is_ok(), "upload_file failed: {result:?}");
     let attachment = result.unwrap();
@@ -227,15 +324,15 @@ async fn test_upload_image_skips_vector_store() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "photo.png".to_owned(),
-            "image/png",
-            Bytes::from(vec![0u8; 2048]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "photo.png",
+        "image/png",
+        Bytes::from(vec![0u8; 2048]),
+    )
+    .await;
 
     assert!(result.is_ok(), "upload image failed: {result:?}");
     let attachment = result.unwrap();
@@ -286,27 +383,27 @@ async fn test_second_upload_reuses_vector_store() {
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
     // First upload
-    let r1 = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "a.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let r1 = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "a.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
     assert!(r1.is_ok(), "1st upload failed: {r1:?}");
 
     // Second upload — should reuse existing vector store
-    let r2 = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "b.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let r2 = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "b.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
     assert!(r2.is_ok(), "2nd upload failed: {r2:?}");
 
     let requests = oagw.captured_requests.lock().unwrap();
@@ -344,15 +441,15 @@ async fn test_upload_unsupported_mime_rejected() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "video.mp4".to_owned(),
-            "video/mp4",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "video.mp4",
+        "video/mp4",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
 
     assert!(result.is_err());
     let requests = oagw.captured_requests.lock().unwrap();
@@ -374,15 +471,15 @@ async fn test_upload_chat_not_found() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            nonexistent_chat,
-            "doc.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        nonexistent_chat,
+        "doc.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
 
     assert!(result.is_err(), "upload to nonexistent chat should fail");
 }
@@ -420,15 +517,15 @@ async fn test_upload_document_limit_exceeded() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, config);
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "third.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "third.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -473,15 +570,15 @@ async fn test_upload_storage_limit_exceeded() {
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, config);
 
     // Try to upload another 200KB — would exceed 1 MB
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "big.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 200_000]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "big.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 200_000]),
+    )
+    .await;
 
     assert!(result.is_err());
     let err = result.unwrap_err();
@@ -517,15 +614,15 @@ async fn test_upload_provider_failure_sets_failed() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "fail.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "fail.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
 
     assert!(result.is_err(), "upload should fail when provider errors");
     assert!(
@@ -676,10 +773,10 @@ async fn test_delete_attachment_idempotent_already_deleted() {
     assert!(result.is_ok(), "idempotent delete should succeed");
 }
 
-// ── P5-F3: Delete by wrong user returns forbidden ──
+// ── P5-F3: Delete by wrong user masked as not-found ──
 
 #[tokio::test]
-async fn test_delete_attachment_wrong_user_forbidden() {
+async fn test_delete_attachment_wrong_user_not_found() {
     let db = inmem_db().await;
     let tenant_id = Uuid::new_v4();
     let chat_id = Uuid::new_v4();
@@ -696,7 +793,8 @@ async fn test_delete_attachment_wrong_user_forbidden() {
     let att_id =
         crate::domain::service::test_helpers::insert_test_attachment(&db_prov, params).await;
 
-    // Different user tries to delete
+    // Different user tries to delete — chat ownership check rejects first
+    // (more secure: user doesn't even learn the chat exists).
     let ctx =
         crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, other_user_id);
     let oagw = MockOagwGateway::with_responses(vec![]);
@@ -704,13 +802,88 @@ async fn test_delete_attachment_wrong_user_forbidden() {
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
     let result = svc.delete_attachment(&ctx, chat_id, att_id).await;
-    assert!(result.is_err());
     assert!(
         matches!(
             result.unwrap_err(),
-            crate::domain::error::DomainError::Forbidden
+            crate::domain::error::DomainError::NotFound { .. }
         ),
-        "expected Forbidden"
+        "cross-owner delete must be masked as NotFound"
+    );
+}
+
+// ── Cross-owner isolation (tenant-only authz, ensure_owner defence-in-depth) ──
+
+#[tokio::test]
+async fn test_get_attachment_cross_owner_not_found() {
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let owner_id = Uuid::new_v4();
+    let other_user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, owner_id).await;
+
+    let mut params =
+        crate::domain::service::test_helpers::InsertTestAttachmentParams::ready_document(
+            tenant_id, chat_id,
+        );
+    params.uploaded_by_user_id = owner_id;
+    let att_id =
+        crate::domain::service::test_helpers::insert_test_attachment(&db_prov, params).await;
+
+    // Different user (same tenant) tries to read the attachment
+    let ctx =
+        crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, other_user_id);
+    let oagw = MockOagwGateway::with_responses(vec![]);
+    let outbox = Arc::new(NoopOutboxEnqueuer);
+    let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
+
+    let result = svc.get_attachment(&ctx, chat_id, att_id).await;
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            crate::domain::error::DomainError::NotFound { .. }
+        ),
+        "cross-owner get_attachment must be masked as NotFound"
+    );
+}
+
+#[tokio::test]
+async fn test_upload_attachment_cross_owner_not_found() {
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let owner_id = Uuid::new_v4();
+    let other_user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, owner_id).await;
+
+    // Different user (same tenant) tries to upload to owner's chat
+    let ctx =
+        crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, other_user_id);
+    let oagw = MockOagwGateway::with_responses(vec![]);
+    let outbox = Arc::new(NoopOutboxEnqueuer);
+    let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
+
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "test.pdf",
+        "application/pdf",
+        Bytes::from_static(b"dummy content"),
+    )
+    .await;
+    assert!(
+        matches!(
+            result.unwrap_err(),
+            crate::domain::error::DomainError::NotFound { .. }
+        ),
+        "cross-owner upload must be masked as NotFound"
+    );
+    assert!(
+        oagw.captured_requests.lock().unwrap().is_empty(),
+        "cross-owner upload must fail before any provider call"
     );
 }
 
@@ -737,15 +910,15 @@ async fn test_upload_mime_charset_stripped() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "notes.txt".to_owned(),
-            "text/plain; charset=utf-8", // charset should be stripped
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "notes.txt",
+        "text/plain; charset=utf-8", // charset should be stripped
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
 
     assert!(
         result.is_ok(),
@@ -787,15 +960,15 @@ async fn test_upload_vector_store_indexing_fails() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "big_doc.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "big_doc.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
 
     assert!(result.is_err(), "indexing failure should propagate");
     assert!(
@@ -845,15 +1018,15 @@ async fn test_create_vector_store_failure_cleans_up_placeholder_row() {
         RagConfig::default(),
     );
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "test.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "test.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
 
     assert!(result.is_err(), "VS create failure should propagate");
 
@@ -905,15 +1078,15 @@ async fn test_vector_store_failure_sets_attachment_failed() {
         RagConfig::default(),
     );
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "report.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "report.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
 
     assert!(result.is_err(), "VS create failure should propagate");
 
@@ -1191,15 +1364,15 @@ async fn test_vector_store_created_on_first_document_upload() {
         RagConfig::default(),
     );
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "doc.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "doc.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
     assert!(result.is_ok(), "upload failed: {result:?}");
 
     // Verify vector store row was created with the OAGW-returned ID
@@ -1246,15 +1419,15 @@ async fn test_vector_store_preexisting_row_reused() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "doc.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "doc.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
     assert!(
         result.is_ok(),
         "upload with preexisting VS failed: {result:?}"
@@ -1317,15 +1490,15 @@ async fn test_storage_within_limit_after_deletions() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, config);
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "new.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 500_000]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "new.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 500_000]),
+    )
+    .await;
 
     assert!(
         result.is_ok(),
@@ -1356,16 +1529,16 @@ async fn test_cas_transition_chain_full_lifecycle() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
-    let att = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "chain.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await
-        .expect("upload should succeed");
+    let att = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "chain.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await
+    .expect("upload should succeed");
 
     // Final state is Ready with provider_file_id set (proves pending→uploaded→ready)
     assert_eq!(
@@ -1437,7 +1610,9 @@ async fn test_provider_file_id_map_excludes_non_ready() {
         .unwrap();
 
     assert_eq!(map.len(), 1, "only ready attachment should be in map");
-    assert_eq!(map.get("file-ready"), Some(&ready_id));
+    let att = map.get("file-ready").expect("file-ready should be in map");
+    assert_eq!(att.id, ready_id);
+    assert_eq!(att.filename, "test.pdf");
 }
 
 // ── P5-K8: build_provider_file_id_map excludes soft-deleted ──
@@ -1482,7 +1657,8 @@ async fn test_provider_file_id_map_excludes_deleted() {
         .unwrap();
 
     assert_eq!(map.len(), 1, "deleted attachment should not be in map");
-    assert_eq!(map.get("file-alive"), Some(&alive_id));
+    let att = map.get("file-alive").expect("file-alive should be in map");
+    assert_eq!(att.id, alive_id);
     assert!(!map.contains_key("file-deleted"));
 }
 
@@ -1775,6 +1951,8 @@ fn dual_provider_resolver(
             kind: ProviderKind::OpenAiResponses,
             upstream_alias: Some("test-host".to_owned()),
             host: "test-host".to_owned(),
+            port: None,
+            use_http: false,
             api_path: "/v1/responses".to_owned(),
             auth_plugin_type: None,
             auth_config: None,
@@ -1791,6 +1969,8 @@ fn dual_provider_resolver(
             kind: ProviderKind::OpenAiResponses,
             upstream_alias: Some("azure-host".to_owned()),
             host: "azure-host".to_owned(),
+            port: None,
+            use_http: false,
             api_path: "/v1/responses".to_owned(),
             auth_plugin_type: None,
             auth_config: None,
@@ -1890,6 +2070,7 @@ fn build_service_azure(
         provider_resolver,
         azure_model_resolver(),
         rag_config,
+        Arc::new(crate::domain::ports::metrics::NoopMetrics),
     )
 }
 
@@ -1916,15 +2097,15 @@ async fn test_upload_document_azure_provider_all_calls_same_alias() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service_azure(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "report.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 1024]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "report.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 1024]),
+    )
+    .await;
 
     assert!(result.is_ok(), "azure upload_file failed: {result:?}");
 
@@ -1984,16 +2165,16 @@ async fn test_upload_document_azure_storage_backend_and_vs_provider_persisted() 
         RagConfig::default(),
     );
 
-    let attachment = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "doc.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 512]),
-        )
-        .await
-        .expect("azure upload should succeed");
+    let attachment = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "doc.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 512]),
+    )
+    .await
+    .expect("azure upload should succeed");
 
     // Verify attachment storage_backend = "azure" (from config field, not "azure_openai")
     assert_eq!(
@@ -2050,15 +2231,15 @@ async fn test_second_upload_provider_mismatch_rejected() {
     let outbox = Arc::new(NoopOutboxEnqueuer);
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, RagConfig::default());
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "b.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 100]),
-        )
-        .await;
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "b.pdf",
+        "application/pdf",
+        Bytes::from(vec![0u8; 100]),
+    )
+    .await;
 
     assert!(result.is_err(), "provider mismatch should be rejected");
     let err = result.unwrap_err();
@@ -2094,15 +2275,15 @@ async fn test_rag_http_client_multipart_uses_params_purpose() {
     let params = crate::domain::ports::UploadFileParams {
         filename: "test.txt".to_owned(),
         content_type: "text/plain".to_owned(),
-        file_bytes: Bytes::from("hello"),
+        file_stream: bytes_to_stream(Bytes::from("hello")),
         purpose: "user_data".to_owned(),
     };
 
     let result = client
-        .multipart_upload(ctx, "/test-host/v1/files", &params)
+        .multipart_upload(ctx, "/test-host/v1/files", params)
         .await;
     assert!(result.is_ok(), "upload failed: {result:?}");
-    assert_eq!(result.unwrap(), "file-001");
+    assert_eq!(result.unwrap().0, "file-001");
 
     // Verify the multipart body contains the custom purpose, not hardcoded "assistants"
     let requests = oagw.captured_requests.lock().unwrap();
@@ -2158,7 +2339,7 @@ async fn test_openai_file_storage_uri_pattern() {
     let params = crate::domain::ports::UploadFileParams {
         filename: "test.txt".to_owned(),
         content_type: "text/plain".to_owned(),
-        file_bytes: Bytes::from("hello"),
+        file_stream: bytes_to_stream(Bytes::from("hello")),
         purpose: "assistants".to_owned(),
     };
 
@@ -2199,7 +2380,7 @@ async fn test_azure_file_storage_uri_pattern() {
     let params = crate::domain::ports::UploadFileParams {
         filename: "test.txt".to_owned(),
         content_type: "text/plain".to_owned(),
-        file_bytes: Bytes::from("hello"),
+        file_stream: bytes_to_stream(Bytes::from("hello")),
         purpose: "assistants".to_owned(),
     };
 
@@ -2261,24 +2442,38 @@ async fn test_dispatching_file_storage_routes_correctly() {
 
     let tenant_id = Uuid::new_v4();
     let ctx = crate::domain::service::test_helpers::test_security_ctx(tenant_id);
-    let params = || crate::domain::ports::UploadFileParams {
-        filename: "test.txt".to_owned(),
-        content_type: "text/plain".to_owned(),
-        file_bytes: Bytes::from("hello"),
-        purpose: "assistants".to_owned(),
-    };
 
     // Upload via OpenAI
-    let r1: Result<String, _> = dispatch.upload_file(ctx.clone(), "openai", params()).await;
+    let r1: Result<(String, u64), _> = dispatch
+        .upload_file(
+            ctx.clone(),
+            "openai",
+            crate::domain::ports::UploadFileParams {
+                filename: "test.txt".to_owned(),
+                content_type: "text/plain".to_owned(),
+                file_stream: bytes_to_stream(Bytes::from("hello")),
+                purpose: "assistants".to_owned(),
+            },
+        )
+        .await;
     assert!(r1.is_ok());
-    assert_eq!(r1.unwrap(), "file-oai-001");
+    assert_eq!(r1.unwrap().0, "file-oai-001");
 
     // Upload via Azure
-    let r2: Result<String, _> = dispatch
-        .upload_file(ctx.clone(), "azure_openai", params())
+    let r2: Result<(String, u64), _> = dispatch
+        .upload_file(
+            ctx.clone(),
+            "azure_openai",
+            crate::domain::ports::UploadFileParams {
+                filename: "test.txt".to_owned(),
+                content_type: "text/plain".to_owned(),
+                file_stream: bytes_to_stream(Bytes::from("hello")),
+                purpose: "assistants".to_owned(),
+            },
+        )
         .await;
     assert!(r2.is_ok());
-    assert_eq!(r2.unwrap(), "file-az-001");
+    assert_eq!(r2.unwrap().0, "file-az-001");
 
     // Verify routing: first request → /v1/, second → /openai/
     let requests = oagw.captured_requests.lock().unwrap();
@@ -2305,11 +2500,11 @@ async fn test_dispatching_file_storage_unknown_provider_returns_error() {
     let params = crate::domain::ports::UploadFileParams {
         filename: "test.txt".to_owned(),
         content_type: "text/plain".to_owned(),
-        file_bytes: Bytes::from("hello"),
+        file_stream: bytes_to_stream(Bytes::from("hello")),
         purpose: "assistants".to_owned(),
     };
 
-    let result: Result<String, _> = dispatch.upload_file(ctx, "nonexistent", params).await;
+    let result: Result<(String, u64), _> = dispatch.upload_file(ctx, "nonexistent", params).await;
     assert!(result.is_err());
     let err = result.unwrap_err();
     assert!(
@@ -2347,6 +2542,8 @@ async fn test_openai_file_storage_uses_tenant_specific_alias() {
             kind: ProviderKind::OpenAiResponses,
             upstream_alias: Some("default-alias".to_owned()),
             host: "api.openai.com".to_owned(),
+            port: None,
+            use_http: false,
             api_path: "/v1/responses".to_owned(),
             auth_plugin_type: None,
             auth_config: None,
@@ -2374,7 +2571,7 @@ async fn test_openai_file_storage_uses_tenant_specific_alias() {
     let params = crate::domain::ports::UploadFileParams {
         filename: "test.txt".to_owned(),
         content_type: "text/plain".to_owned(),
-        file_bytes: Bytes::from("hello"),
+        file_stream: bytes_to_stream(Bytes::from("hello")),
         purpose: "assistants".to_owned(),
     };
 
@@ -2391,11 +2588,14 @@ async fn test_openai_file_storage_uses_tenant_specific_alias() {
     );
 }
 
-// ── Per-file size validation ──
+// ════════════════════════════════════════════════════════════════════════════
+// Upload limits resolution (get_upload_context)
+// ════════════════════════════════════════════════════════════════════════════
 
+/// CCM per-model limit is tighter than `ConfigMap` → effective = CCM.
 #[tokio::test]
-async fn test_document_exceeding_max_size_returns_file_too_large() {
-    use crate::domain::error::DomainError;
+async fn test_upload_limits_ccm_tighter_than_configmap() {
+    use mini_chat_sdk::ModelTier;
 
     let db = inmem_db().await;
     let tenant_id = Uuid::new_v4();
@@ -2406,37 +2606,83 @@ async fn test_document_exceeding_max_size_returns_file_too_large() {
 
     let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
 
+    // Model with max_file_size_mb = 10 (tighter than ConfigMap's 25 MB default)
+    let mut entry = test_catalog_entry(TestCatalogEntryParams {
+        model_id: "gpt-5.2".to_owned(),
+        provider_model_id: "gpt-5.2-2025-03-26".to_owned(),
+        display_name: "GPT 5.2".to_owned(),
+        tier: ModelTier::Standard,
+        enabled: true,
+        is_default: true,
+        input_tokens_credit_multiplier_micro: 1_000_000,
+        output_tokens_credit_multiplier_micro: 3_000_000,
+        multimodal_capabilities: vec![],
+        context_window: 128_000,
+        max_output_tokens: 16_384,
+        description: String::new(),
+        provider_display_name: "OpenAI".to_owned(),
+        multiplier_display: "1x".to_owned(),
+        provider_id: "openai".to_owned(),
+    });
+    entry.general_config.max_file_size_mb = 10; // 10 MB — tighter than 25 MB default
+
+    let model_resolver: Arc<dyn crate::domain::repos::ModelResolver> =
+        Arc::new(MockModelResolver::new(vec![entry]));
+
     let oagw = MockOagwGateway::with_responses(vec![]);
-    let outbox = Arc::new(NoopOutboxEnqueuer);
+    let db_prov_arc = mock_db_provider(db.clone());
+    let provider_resolver = test_provider_resolver(&(Arc::clone(&oagw) as _));
+    let rag_config = RagConfig::default();
 
-    // Set max_document_size_kb to 1 KB so a 2 KB file exceeds it
-    let rag_config = RagConfig {
-        max_document_size_kb: 1,
-        ..RagConfig::default()
-    };
-    let svc = build_service(db, Arc::clone(&oagw) as _, outbox, rag_config);
+    let svc =
+        AttachmentService::new(
+            db_prov_arc,
+            Arc::new(OrmAttachmentRepository),
+            Arc::new(OrmChatRepository::new(modkit_db::odata::LimitCfg {
+                default: 20,
+                max: 100,
+            })),
+            Arc::new(OrmVectorStoreRepository),
+            Arc::new(NoopOutboxEnqueuer),
+            mock_tenant_only_enforcer(),
+            Arc::new(
+                crate::infra::llm::providers::openai_file_storage::OpenAiFileStorage::new(
+                    Arc::new(
+                        crate::infra::llm::providers::rag_http_client::RagHttpClient::new(
+                            Arc::clone(&oagw) as _,
+                        ),
+                    ),
+                    Arc::clone(&provider_resolver),
+                ),
+            ),
+            Arc::new(
+                crate::infra::llm::providers::openai_vector_store::OpenAiVectorStore::new(
+                    Arc::new(
+                        crate::infra::llm::providers::rag_http_client::RagHttpClient::new(
+                            Arc::clone(&oagw) as _,
+                        ),
+                    ),
+                    Arc::clone(&provider_resolver),
+                ),
+            ),
+            provider_resolver,
+            model_resolver,
+            rag_config,
+            Arc::new(crate::domain::ports::metrics::NoopMetrics),
+        );
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "big.pdf".to_owned(),
-            "application/pdf",
-            Bytes::from(vec![0u8; 2048]),
-        )
-        .await;
+    let upload_ctx = svc.get_upload_context(&ctx, chat_id).await.unwrap();
 
-    assert!(result.is_err(), "should reject oversized document");
-    assert!(
-        matches!(result.unwrap_err(), DomainError::FileTooLarge { .. }),
-        "should be FileTooLarge"
-    );
+    // CCM = 10 MB = 10_485_760 bytes; ConfigMap = 25 MB = 25_600 KB * 1024 = 26_214_400
+    // Effective = min(26_214_400, 10_485_760) = 10_485_760
+    assert_eq!(upload_ctx.limits.max_file_bytes, 10_485_760);
+    // Image: ConfigMap = 5 MB = 5_242_880; CCM = 10_485_760; effective = 5_242_880
+    assert_eq!(upload_ctx.limits.max_image_bytes, 5_242_880);
 }
 
+/// `ConfigMap` limit is tighter than CCM → effective = `ConfigMap`.
 #[tokio::test]
-async fn test_image_exceeding_max_size_returns_file_too_large() {
-    use crate::domain::error::DomainError;
-
+async fn test_upload_limits_configmap_tighter_than_ccm() {
     let db = inmem_db().await;
     let tenant_id = Uuid::new_v4();
     let chat_id = Uuid::new_v4();
@@ -2449,26 +2695,74 @@ async fn test_image_exceeding_max_size_returns_file_too_large() {
     let oagw = MockOagwGateway::with_responses(vec![]);
     let outbox = Arc::new(NoopOutboxEnqueuer);
 
-    // Set max_image_size_kb to 1 KB so a 2 KB image exceeds it
+    // ConfigMap with very small file limit (1 KB)
     let rag_config = RagConfig {
-        max_image_size_kb: 1,
+        uploaded_file_max_size_kb: 1,
         ..RagConfig::default()
     };
     let svc = build_service(db, Arc::clone(&oagw) as _, outbox, rag_config);
 
-    let result = svc
-        .upload_file(
-            &ctx,
-            chat_id,
-            "big.png".to_owned(),
-            "image/png",
-            Bytes::from(vec![0u8; 2048]),
-        )
-        .await;
+    let upload_ctx = svc.get_upload_context(&ctx, chat_id).await.unwrap();
 
-    assert!(result.is_err(), "should reject oversized image");
-    assert!(
-        matches!(result.unwrap_err(), DomainError::FileTooLarge { .. }),
-        "should be FileTooLarge"
+    // ConfigMap = 1 KB = 1024 bytes; CCM default = 25 MB; effective = 1024
+    assert_eq!(upload_ctx.limits.max_file_bytes, 1024);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Metrics emission
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Successful image upload emits upload counter, bytes histogram, and
+/// the pending gauge returns to zero (`PendingGuard` balanced).
+#[tokio::test]
+async fn upload_image_emits_metrics_and_gauge_balanced() {
+    use crate::domain::service::test_helpers::TestMetrics;
+    use std::sync::atomic::Ordering;
+
+    let db = inmem_db().await;
+    let tenant_id = Uuid::new_v4();
+    let chat_id = Uuid::new_v4();
+    let user_id = Uuid::new_v4();
+    let db_prov = mock_db_provider(db.clone());
+    insert_chat_for_user(&db_prov, tenant_id, chat_id, user_id).await;
+
+    let ctx = crate::domain::service::test_helpers::test_security_ctx_with_id(tenant_id, user_id);
+
+    let oagw = MockOagwGateway::with_responses(vec![Ok(file_upload_response("file-img-m1"))]);
+    let outbox = Arc::new(NoopOutboxEnqueuer);
+    let metrics = Arc::new(TestMetrics::new());
+    let svc = build_service_with_metrics(
+        db,
+        Arc::clone(&oagw) as _,
+        outbox,
+        RagConfig::default(),
+        Arc::clone(&metrics) as _,
+    );
+
+    let result = test_upload_file(
+        &svc,
+        &ctx,
+        chat_id,
+        "photo.png",
+        "image/png",
+        Bytes::from(vec![0u8; 2048]),
+    )
+    .await;
+    assert!(result.is_ok(), "upload should succeed: {result:?}");
+
+    assert_eq!(
+        metrics.attachment_upload.load(Ordering::Relaxed),
+        1,
+        "should record attachment_upload counter"
+    );
+    assert_eq!(
+        metrics.attachment_upload_bytes.load(Ordering::Relaxed),
+        1,
+        "should record attachment_upload_bytes histogram"
+    );
+    assert_eq!(
+        metrics.attachments_pending.load(Ordering::Relaxed),
+        0,
+        "pending gauge should be back to zero (guard balanced)"
     );
 }

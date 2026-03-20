@@ -11,13 +11,13 @@ use super::handler::{
     Handler, MessageHandler, PerMessageAdapter, TransactionalHandler, TransactionalMessageHandler,
 };
 use super::manager::{OutboxBuilder, QueueDeclaration};
-use super::stats::{StatsListener, StatsRegistry};
+use super::stats::StatsRegistry;
 use super::strategy::{DecoupledStrategy, TransactionalStrategy, generate_worker_id};
 use super::taskward::{
     BackoffConfig, Bulkhead, BulkheadConfig, ConcurrencyLimit, PanicPolicy, TracingListener,
     WorkerBuilder,
 };
-use super::types::{Partitions, QueueConfig};
+use super::types::{Partitions, WorkerTuning};
 use super::workers::processor::{PartitionProcessor, ProcessorReport};
 use crate::Db;
 
@@ -34,6 +34,8 @@ pub struct SpawnContext {
     pub outbox: Arc<Outbox>,
     /// Shared stats registry for processor workers. `None` when stats disabled.
     pub stats_registry: Option<Arc<std::sync::Mutex<StatsRegistry>>>,
+    /// Processor worker tuning (batch size, pacing, retry backoff).
+    pub tuning: WorkerTuning,
 }
 
 /// Trait for creating processor workers. One impl per processing mode.
@@ -45,35 +47,35 @@ pub trait ProcessorFactory: Send {
 fn build_processor_worker<S: super::strategy::ProcessingStrategy + 'static>(
     ctx: &SpawnContext,
     strategy: S,
-    config: QueueConfig,
 ) -> (String, Pin<Box<dyn Future<Output = ()> + Send>>) {
-    let processor = PartitionProcessor::new(strategy, ctx.pid, config, ctx.db.clone());
+    let processor = PartitionProcessor::new(strategy, ctx.pid, ctx.tuning.clone(), ctx.db.clone());
     let name = format!("processor-{}", ctx.pid);
+    let (poker_notify, _poker_handle) =
+        super::taskward::poker(ctx.tuning.idle_interval, ctx.cancel.clone());
     let mut builder = WorkerBuilder::<ProcessorReport>::new(&name, ctx.cancel.clone())
+        .pacing(&ctx.tuning)
+        .notifier(poker_notify)
         .notifier(Arc::clone(&ctx.partition_notify))
         .notifier(Arc::clone(&ctx.start_notify))
-        .with_poker(processor.poll_interval())
         .bulkhead(Bulkhead::new(
             &name,
             BulkheadConfig {
                 semaphore: ConcurrencyLimit::Fixed(Arc::clone(&ctx.processor_sem)),
                 backoff: BackoffConfig::default(),
-                steady_pace: Duration::ZERO,
             },
         ))
         .listener(TracingListener)
         .on_panic(PanicPolicy::CatchAndRetry);
 
-    if let Some(ref registry) = ctx.stats_registry {
-        let stats = StatsListener::new(Box::new(|any| {
+    builder = super::manager::register_stats(
+        builder,
+        ctx.stats_registry.as_ref(),
+        "processor",
+        Box::new(|any| {
             any.downcast_ref::<ProcessorReport>()
                 .map_or(0, |r| u64::from(r.messages_processed))
-        }));
-        if let Ok(mut reg) = registry.lock() {
-            reg.register("processor".to_owned(), stats.clone());
-        }
-        builder = builder.listener(stats);
-    }
+        }),
+    );
 
     let worker = builder.build(processor);
     (name, Box::pin(worker.run()))
@@ -89,7 +91,6 @@ pub struct QueueBuilder {
     builder: OutboxBuilder,
     name: String,
     partitions: Partitions,
-    config: QueueConfig,
 }
 
 impl QueueBuilder {
@@ -98,65 +99,47 @@ impl QueueBuilder {
             builder,
             name,
             partitions,
-            config: QueueConfig::default(),
         }
     }
 
-    /// Messages per handler call per partition.
-    pub fn msg_batch_size(mut self, n: u32) -> Self {
-        self.config.msg_batch_size = n;
-        self
-    }
-
-    /// Base delay for exponential backoff on retry.
-    pub fn backoff_base(mut self, d: Duration) -> Self {
-        self.config.backoff_base = d;
-        self
-    }
-
-    /// Maximum delay for exponential backoff on retry.
-    pub fn backoff_max(mut self, d: Duration) -> Self {
-        self.config.backoff_max = d;
-        self
-    }
+    // msg_batch_size removed — batch size now lives on WorkerTuning::batch_size.
+    // backoff_base/backoff_max removed — retry backoff now lives on
+    // WorkerTuning::retry_base/retry_max.
+    // Use .processor_tuning() or .profile() on OutboxBuilder instead.
 
     /// Register a single-message transactional handler (common case).
     ///
-    /// Forces `msg_batch_size = 1` — the `PerMessageAdapter` adapter processes
-    /// one message at a time, so fetching larger batches would be wasteful.
+    /// The `PerMessageAdapter` processes one message at a time.
+    /// The processor factory overrides `WorkerTuning::batch_size` to 1
+    /// so only one message is fetched per cycle.
     #[must_use]
     pub fn transactional(
-        mut self,
+        self,
         handler: impl TransactionalMessageHandler + 'static,
     ) -> OutboxBuilder {
-        self.config.msg_batch_size = 1;
-        self.batch_transactional(PerMessageAdapter::new(handler))
+        self.register_transactional(PerMessageAdapter::new(handler), true)
     }
 
     /// Register a single-message decoupled handler (common case).
     ///
-    /// Forces `msg_batch_size = 1` — the `PerMessageAdapter` adapter processes
-    /// one message at a time, so fetching larger batches would be wasteful.
+    /// The `PerMessageAdapter` processes one message at a time.
+    /// The processor factory overrides `WorkerTuning::batch_size` to 1.
     #[must_use]
-    pub fn decoupled(mut self, handler: impl MessageHandler + 'static) -> OutboxBuilder {
-        self.config.msg_batch_size = 1;
-        self.batch_decoupled(PerMessageAdapter::new(handler))
+    pub fn decoupled(self, handler: impl MessageHandler + 'static) -> OutboxBuilder {
+        self.register_decoupled(PerMessageAdapter::new(handler), true, None)
     }
 
     /// Register a single-message decoupled handler with explicit configuration.
     ///
-    /// Forces `msg_batch_size = 1`. Use this to customize `lease_duration`
-    /// and other decoupled-specific settings.
+    /// Use this to customize `lease_duration`.
     #[must_use]
     pub fn decoupled_with(
-        mut self,
+        self,
         handler: impl MessageHandler + 'static,
         config: super::types::DecoupledConfig,
     ) -> OutboxBuilder {
-        self.config.msg_batch_size = 1;
         let super::types::DecoupledConfig { lease_duration } = config;
-        self.config.lease_duration = lease_duration;
-        self.batch_decoupled(PerMessageAdapter::new(handler))
+        self.register_decoupled(PerMessageAdapter::new(handler), true, Some(lease_duration))
     }
 
     /// Register a batch transactional handler (advanced).
@@ -165,35 +148,55 @@ impl QueueBuilder {
         self,
         handler: impl TransactionalHandler + 'static,
     ) -> OutboxBuilder {
+        self.register_transactional(handler, false)
+    }
+
+    /// Internal: register a transactional handler with `per_message` flag.
+    fn register_transactional(
+        self,
+        handler: impl TransactionalHandler + 'static,
+        per_message: bool,
+    ) -> OutboxBuilder {
         let factory = TransactionalProcessorFactory {
             handler: Arc::new(handler),
-            config: self.config.clone(),
+            per_message,
         };
 
         let mut builder = self.builder;
         builder.queue_declarations.push(QueueDeclaration {
             name: self.name,
             partitions: self.partitions,
-            config: self.config,
             factory: Box::new(factory),
         });
         builder
     }
 
     /// Register a batch decoupled handler (advanced).
+    ///
+    /// Uses `WorkerTuning::batch_size` as-is (not forced to 1).
     #[must_use]
     pub fn batch_decoupled(self, handler: impl Handler + 'static) -> OutboxBuilder {
+        self.register_decoupled(handler, false, None)
+    }
+
+    /// Internal: register a decoupled handler with `per_message` flag.
+    fn register_decoupled(
+        self,
+        handler: impl Handler + 'static,
+        per_message: bool,
+        lease_duration_override: Option<Duration>,
+    ) -> OutboxBuilder {
         let factory = DecoupledProcessorFactory {
             handler: Arc::new(handler),
-            config: self.config.clone(),
             queue_name: self.name.clone(),
+            per_message,
+            lease_duration_override,
         };
 
         let mut builder = self.builder;
         builder.queue_declarations.push(QueueDeclaration {
             name: self.name,
             partitions: self.partitions,
-            config: self.config,
             factory: Box::new(factory),
         });
         builder
@@ -202,13 +205,12 @@ impl QueueBuilder {
     /// Register a batch decoupled handler with explicit configuration (advanced).
     #[must_use]
     pub fn batch_decoupled_with(
-        mut self,
+        self,
         handler: impl Handler + 'static,
         config: super::types::DecoupledConfig,
     ) -> OutboxBuilder {
         let super::types::DecoupledConfig { lease_duration } = config;
-        self.config.lease_duration = lease_duration;
-        self.batch_decoupled(handler)
+        self.register_decoupled(handler, false, Some(lease_duration))
     }
 }
 
@@ -216,30 +218,45 @@ impl QueueBuilder {
 
 struct TransactionalProcessorFactory<H: TransactionalHandler> {
     handler: Arc<H>,
-    config: QueueConfig,
+    /// When true, override `tuning.batch_size` to 1 (per-message adapter).
+    per_message: bool,
 }
 
 impl<H: TransactionalHandler + 'static> ProcessorFactory for TransactionalProcessorFactory<H> {
-    fn spawn(&self, ctx: SpawnContext) -> (String, Pin<Box<dyn Future<Output = ()> + Send>>) {
+    fn spawn(&self, mut ctx: SpawnContext) -> (String, Pin<Box<dyn Future<Output = ()> + Send>>) {
+        if self.per_message {
+            // Per-message handlers process one message at a time via PerMessageAdapter,
+            // so force batch_size=1 to avoid fetching messages that won't be processed.
+            ctx.tuning.batch_size = 1;
+        }
         let strategy = TransactionalStrategy::new(Box::new(ArcTransactionalHandler(Arc::clone(
             &self.handler,
         ))));
-        build_processor_worker(&ctx, strategy, self.config.clone())
+        build_processor_worker(&ctx, strategy)
     }
 }
 
 struct DecoupledProcessorFactory<H: Handler> {
     handler: Arc<H>,
-    config: QueueConfig,
     queue_name: String,
+    /// When true, override `tuning.batch_size` to 1 (per-message adapter).
+    per_message: bool,
+    /// Optional lease duration override from `DecoupledConfig`.
+    lease_duration_override: Option<Duration>,
 }
 
 impl<H: Handler + 'static> ProcessorFactory for DecoupledProcessorFactory<H> {
-    fn spawn(&self, ctx: SpawnContext) -> (String, Pin<Box<dyn Future<Output = ()> + Send>>) {
+    fn spawn(&self, mut ctx: SpawnContext) -> (String, Pin<Box<dyn Future<Output = ()> + Send>>) {
+        if self.per_message {
+            ctx.tuning.batch_size = 1;
+        }
+        if let Some(ld) = self.lease_duration_override {
+            ctx.tuning.lease_duration = ld;
+        }
         let worker_id = generate_worker_id(&self.queue_name);
         let strategy =
             DecoupledStrategy::new(Box::new(ArcHandler(Arc::clone(&self.handler))), worker_id);
-        build_processor_worker(&ctx, strategy, self.config.clone())
+        build_processor_worker(&ctx, strategy)
     }
 }
 
@@ -284,14 +301,6 @@ impl<H: Handler> Handler for ArcHandler<H> {
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
-    use crate::outbox::types::DEFAULT_LEASE_DURATION;
-
-    #[test]
-    fn queue_config_defaults() {
-        let config = QueueConfig::default();
-        assert_eq!(config.lease_duration, DEFAULT_LEASE_DURATION);
-        assert_eq!(config.msg_batch_size, 1);
-    }
 
     #[test]
     fn partitions_count() {

@@ -31,6 +31,8 @@ pub struct MiniChatConfig {
     #[expand_vars]
     #[serde(skip_serializing)]
     pub client_credentials: ClientCredentialsConfig,
+    #[serde(default)]
+    pub metrics: MetricsConfig,
     /// Provider registry. Key = `provider_id` (matches [`ModelCatalogEntry::provider_id`]).
     #[expand_vars]
     #[serde(default = "default_providers")]
@@ -52,6 +54,30 @@ pub enum StorageKind {
     Azure,
 }
 
+/// Metrics configuration.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsConfig {
+    /// Metric name prefix. When empty (the default), derived from the module
+    /// name by converting it to `snake_case` (e.g., `"mini-chat"` → `"mini_chat"`).
+    #[serde(default)]
+    pub prefix: String,
+}
+
+impl MetricsConfig {
+    /// Resolve the effective prefix: explicit config value, or
+    /// `snake_case(module_name)`.
+    #[must_use]
+    pub fn effective_prefix(&self, module_name: &str) -> String {
+        let trimmed = self.prefix.trim();
+        if trimmed.is_empty() {
+            heck::ToSnakeCase::to_snake_case(module_name)
+        } else {
+            trimmed.to_owned()
+        }
+    }
+}
+
 /// Configuration for a single LLM provider.
 #[derive(Debug, Clone, Serialize, Deserialize, modkit_macros::ExpandVars)]
 #[serde(deny_unknown_fields)]
@@ -71,6 +97,14 @@ pub struct ProviderEntry {
     /// registration during module init.
     #[expand_vars]
     pub host: String,
+    /// Upstream port. Defaults to `443` (HTTPS). Set to a non-standard port
+    /// for local/mock providers.
+    #[serde(default)]
+    pub port: Option<u16>,
+    /// Use plain HTTP instead of HTTPS for this upstream. Defaults to `false`.
+    /// Only effective when the oagw `allow_http_upstream` option is also enabled.
+    #[serde(default)]
+    pub use_http: bool,
     /// API path template for the responses endpoint.
     /// Use `{model}` as placeholder for the deployment/model name.
     /// Defaults to `/v1/responses` (`OpenAI` native).
@@ -178,6 +212,9 @@ impl ProviderEntry {
         if self.host.trim().is_empty() {
             return Err(format!("provider '{provider_id}': host must not be empty"));
         }
+        if self.port == Some(0) {
+            return Err(format!("provider '{provider_id}': port must not be 0"));
+        }
         for (tid, tenant_override) in &self.tenant_overrides {
             if let Some(h) = &tenant_override.host
                 && h.trim().is_empty()
@@ -220,6 +257,8 @@ fn default_providers() -> HashMap<String, ProviderEntry> {
             kind: ProviderKind::OpenAiResponses,
             upstream_alias: None,
             host: "api.openai.com".to_owned(),
+            port: None,
+            use_http: false,
             api_path: default_api_path(),
             auth_plugin_type: Some(
                 "gts.x.core.oagw.auth_plugin.v1~x.core.oagw.apikey.v1".to_owned(),
@@ -281,6 +320,11 @@ pub struct StreamingConfig {
     /// Default 32768 (matching common model limits).
     #[serde(default = "default_max_output_tokens")]
     pub max_output_tokens: u32,
+
+    /// Search context size passed to the `web_search` tool.
+    /// Valid values: "low", "medium", "high" (default "low").
+    #[serde(default)]
+    pub web_search_context_size: crate::domain::llm::WebSearchContextSize,
 }
 
 impl Default for StreamingConfig {
@@ -289,6 +333,7 @@ impl Default for StreamingConfig {
             sse_channel_capacity: default_channel_capacity(),
             sse_ping_interval_seconds: default_ping_interval(),
             max_output_tokens: default_max_output_tokens(),
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::default(),
         }
     }
 }
@@ -300,7 +345,7 @@ fn default_max_output_tokens() -> u32 {
 impl StreamingConfig {
     /// Validate configuration values at startup. Returns an error message
     /// describing the first invalid value found.
-    pub fn validate(self) -> Result<(), String> {
+    pub fn validate(&self) -> Result<(), String> {
         if !(16..=64).contains(&self.sse_channel_capacity) {
             return Err(format!(
                 "sse_channel_capacity must be 16-64, got {}",
@@ -313,6 +358,7 @@ impl StreamingConfig {
                 self.sse_ping_interval_seconds
             ));
         }
+        // web_search_context_size validated by serde at parse time (enum).
         Ok(())
     }
 }
@@ -337,6 +383,7 @@ impl Default for MiniChatConfig {
             context: ContextConfig::default(),
             rag: RagConfig::default(),
             client_credentials: ClientCredentialsConfig::default(),
+            metrics: MetricsConfig::default(),
             providers: default_providers(),
         }
     }
@@ -437,6 +484,9 @@ fn default_web_search_max_calls() -> u32 {
 fn default_web_search_daily_quota() -> u32 {
     75
 }
+fn default_warning_threshold_pct() -> u8 {
+    80
+}
 
 /// Quota enforcement configuration.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -448,6 +498,8 @@ pub struct QuotaConfig {
     pub web_search_max_calls_per_message: u32,
     #[serde(default = "default_web_search_daily_quota")]
     pub web_search_daily_quota: u32,
+    #[serde(default = "default_warning_threshold_pct")]
+    pub warning_threshold_pct: u8,
 }
 
 impl Default for QuotaConfig {
@@ -456,6 +508,7 @@ impl Default for QuotaConfig {
             overshoot_tolerance_factor: default_overshoot_tolerance(),
             web_search_max_calls_per_message: default_web_search_max_calls(),
             web_search_daily_quota: default_web_search_daily_quota(),
+            warning_threshold_pct: default_warning_threshold_pct(),
         }
     }
 }
@@ -474,11 +527,17 @@ impl QuotaConfig {
         if self.web_search_daily_quota == 0 {
             return Err("web_search_daily_quota must be > 0".to_owned());
         }
+        if self.warning_threshold_pct == 0 || self.warning_threshold_pct >= 100 {
+            return Err(format!(
+                "warning_threshold_pct must be 1-99, got {}",
+                self.warning_threshold_pct
+            ));
+        }
         Ok(())
     }
 }
 
-/// Outbox configuration for usage event publishing.
+/// Outbox configuration for usage and audit event publishing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutboxConfig {
@@ -489,6 +548,9 @@ pub struct OutboxConfig {
     /// Queue name for attachment cleanup events.
     #[serde(default = "default_outbox_cleanup_queue_name")]
     pub cleanup_queue_name: String,
+    /// Queue name for audit events.
+    #[serde(default = "default_audit_queue_name")]
+    pub audit_queue_name: String,
 
     /// Number of outbox partitions. Must be 1–64.
     #[serde(default = "default_outbox_num_partitions")]
@@ -500,6 +562,7 @@ impl Default for OutboxConfig {
         Self {
             queue_name: default_outbox_queue_name(),
             cleanup_queue_name: default_outbox_cleanup_queue_name(),
+            audit_queue_name: default_audit_queue_name(),
             num_partitions: default_outbox_num_partitions(),
         }
     }
@@ -512,6 +575,9 @@ impl OutboxConfig {
         }
         if self.cleanup_queue_name.trim().is_empty() {
             return Err("outbox cleanup_queue_name must not be empty".to_owned());
+        }
+        if self.audit_queue_name.trim().is_empty() {
+            return Err("outbox audit_queue_name must not be empty".to_owned());
         }
         if !(1..=64).contains(&self.num_partitions) || !self.num_partitions.is_power_of_two() {
             return Err(format!(
@@ -529,6 +595,10 @@ fn default_outbox_queue_name() -> String {
 
 fn default_outbox_cleanup_queue_name() -> String {
     "mini-chat.attachment_cleanup".to_owned()
+}
+
+fn default_audit_queue_name() -> String {
+    "mini-chat.audit".to_owned()
 }
 
 fn default_outbox_num_partitions() -> u32 {
@@ -600,12 +670,12 @@ fn default_max_total_upload_mb_per_chat() -> u32 {
     100
 }
 
-fn default_max_document_size_kb() -> u32 {
+fn default_uploaded_file_max_size_kb() -> u32 {
     // 25 MB in KB
     25 * 1024
 }
 
-fn default_max_image_size_kb() -> u32 {
+fn default_uploaded_image_max_size_kb() -> u32 {
     // 5 MB in KB
     5 * 1024
 }
@@ -622,13 +692,17 @@ pub struct RagConfig {
     #[serde(default = "default_max_total_upload_mb_per_chat")]
     pub max_total_upload_mb_per_chat: u32,
 
-    /// Maximum single document file size in KB.
-    #[serde(default = "default_max_document_size_kb")]
-    pub max_document_size_kb: u32,
+    /// Maximum single uploaded file (document) size in KB.
+    #[serde(default = "default_uploaded_file_max_size_kb")]
+    pub uploaded_file_max_size_kb: u32,
 
-    /// Maximum single image file size in KB.
-    #[serde(default = "default_max_image_size_kb")]
-    pub max_image_size_kb: u32,
+    /// Maximum single uploaded image size in KB.
+    #[serde(default = "default_uploaded_image_max_size_kb")]
+    pub uploaded_image_max_size_kb: u32,
+
+    /// Accept `text/csv` uploads remapped to `text/plain` for `file_search`.
+    #[serde(default = "default_true")]
+    pub allow_csv_upload: bool,
 }
 
 impl Default for RagConfig {
@@ -636,8 +710,9 @@ impl Default for RagConfig {
         Self {
             max_documents_per_chat: default_max_documents_per_chat(),
             max_total_upload_mb_per_chat: default_max_total_upload_mb_per_chat(),
-            max_document_size_kb: default_max_document_size_kb(),
-            max_image_size_kb: default_max_image_size_kb(),
+            uploaded_file_max_size_kb: default_uploaded_file_max_size_kb(),
+            uploaded_image_max_size_kb: default_uploaded_image_max_size_kb(),
+            allow_csv_upload: true,
         }
     }
 }
@@ -650,11 +725,11 @@ impl RagConfig {
         if self.max_total_upload_mb_per_chat == 0 {
             return Err("rag max_total_upload_mb_per_chat must be > 0".into());
         }
-        if self.max_document_size_kb == 0 {
-            return Err("rag max_document_size_kb must be > 0".into());
+        if self.uploaded_file_max_size_kb == 0 {
+            return Err("rag uploaded_file_max_size_kb must be > 0".into());
         }
-        if self.max_image_size_kb == 0 {
-            return Err("rag max_image_size_kb must be > 0".into());
+        if self.uploaded_image_max_size_kb == 0 {
+            return Err("rag uploaded_image_max_size_kb must be > 0".into());
         }
         Ok(())
     }
@@ -833,6 +908,35 @@ mod tests {
     }
 
     #[test]
+    fn streaming_config_web_search_context_size_enum() {
+        use crate::domain::llm::WebSearchContextSize;
+
+        // Default is Low
+        let cfg = StreamingConfig::default();
+        assert_eq!(cfg.web_search_context_size, WebSearchContextSize::Low);
+
+        // Valid values deserialize correctly
+        for (json_val, expected) in [
+            ("\"low\"", WebSearchContextSize::Low),
+            ("\"medium\"", WebSearchContextSize::Medium),
+            ("\"high\"", WebSearchContextSize::High),
+        ] {
+            let json = format!(r#"{{"web_search_context_size": {json_val}}}"#);
+            let cfg: StreamingConfig = serde_json::from_str(&json).unwrap();
+            assert_eq!(cfg.web_search_context_size, expected);
+        }
+
+        // Invalid values rejected at parse time
+        for bad in ["\"Low\"", "\"med\"", "\"HIGH\"", "\"none\"", "\"\""] {
+            let json = format!(r#"{{"web_search_context_size": {bad}}}"#);
+            assert!(
+                serde_json::from_str::<StreamingConfig>(&json).is_err(),
+                "expected parse error for {bad}"
+            );
+        }
+    }
+
+    #[test]
     fn provider_entry_deser_with_alias() {
         let json = r#"{
             "kind": "openai_responses",
@@ -920,6 +1024,8 @@ mod tests {
             kind: crate::infra::llm::ProviderKind::OpenAiResponses,
             upstream_alias: None,
             host: "default.openai.azure.com".to_owned(),
+            port: None,
+            use_http: false,
             api_path: "/v1/responses".to_owned(),
             auth_plugin_type: None,
             auth_config: None,
@@ -983,6 +1089,8 @@ mod tests {
             kind: crate::infra::llm::ProviderKind::OpenAiResponses,
             upstream_alias: None,
             host: "default.openai.azure.com".to_owned(),
+            port: None,
+            use_http: false,
             api_path: "/v1/responses".to_owned(),
             auth_plugin_type: Some("root-plugin".to_owned()),
             auth_config: Some(root_auth),
@@ -1038,6 +1146,8 @@ mod tests {
             kind: crate::infra::llm::ProviderKind::OpenAiResponses,
             upstream_alias: None,
             host: "default.openai.azure.com".to_owned(),
+            port: None,
+            use_http: false,
             api_path: "/v1/responses".to_owned(),
             auth_plugin_type: None,
             auth_config: None,
@@ -1070,6 +1180,8 @@ mod tests {
             kind: crate::infra::llm::ProviderKind::OpenAiResponses,
             upstream_alias: None,
             host: "default.openai.azure.com".to_owned(),
+            port: None,
+            use_http: false,
             api_path: "/v1/responses".to_owned(),
             auth_plugin_type: None,
             auth_config: None,
@@ -1106,6 +1218,8 @@ mod tests {
             kind: crate::infra::llm::ProviderKind::OpenAiResponses,
             upstream_alias: None,
             host: "default.openai.azure.com".to_owned(),
+            port: None,
+            use_http: false,
             api_path: "/v1/responses".to_owned(),
             auth_plugin_type: None,
             auth_config: None,
@@ -1138,6 +1252,8 @@ mod tests {
             kind: crate::infra::llm::ProviderKind::OpenAiResponses,
             upstream_alias: None,
             host: "default.openai.azure.com".to_owned(),
+            port: None,
+            use_http: false,
             api_path: "/v1/responses".to_owned(),
             auth_plugin_type: None,
             auth_config: None,
@@ -1168,6 +1284,8 @@ mod tests {
             kind: crate::infra::llm::ProviderKind::OpenAiResponses,
             upstream_alias: None,
             host: "default.openai.azure.com".to_owned(),
+            port: None,
+            use_http: false,
             api_path: "/v1/responses".to_owned(),
             auth_plugin_type: None,
             auth_config: None,
@@ -1190,5 +1308,29 @@ mod tests {
             },
         };
         assert!(entry.validate("azure_openai").is_ok());
+    }
+
+    #[test]
+    fn metrics_effective_prefix_uses_module_name_when_empty() {
+        let cfg = MetricsConfig {
+            prefix: String::new(),
+        };
+        assert_eq!(cfg.effective_prefix("mini-chat"), "mini_chat");
+    }
+
+    #[test]
+    fn metrics_effective_prefix_uses_module_name_when_whitespace() {
+        let cfg = MetricsConfig {
+            prefix: "   ".to_owned(),
+        };
+        assert_eq!(cfg.effective_prefix("mini-chat"), "mini_chat");
+    }
+
+    #[test]
+    fn metrics_effective_prefix_uses_trimmed_explicit_prefix() {
+        let cfg = MetricsConfig {
+            prefix: "  custom.prefix  ".to_owned(),
+        };
+        assert_eq!(cfg.effective_prefix("mini-chat"), "custom.prefix");
     }
 }

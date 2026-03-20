@@ -6,6 +6,37 @@ decision-makers: OAGW Team
 
 # Concurrency Control — Semaphore-Based Limiting at Upstream, Route, and Tenant Levels
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Three Levels of Concurrency Limits](#three-levels-of-concurrency-limits)
+  - [Implementation](#implementation)
+  - [Upstream Concurrency Config](#upstream-concurrency-config)
+  - [Route Concurrency Config](#route-concurrency-config)
+  - [Tenant-Global Concurrency](#tenant-global-concurrency)
+  - [Merge Strategy (Hierarchical Configuration)](#merge-strategy-hierarchical-configuration)
+  - [Error Handling](#error-handling)
+  - [Metrics](#metrics)
+  - [Interaction with Other Systems](#interaction-with-other-systems)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Semaphore-based in-memory limiting](#semaphore-based-in-memory-limiting)
+  - [Redis-based distributed limiting](#redis-based-distributed-limiting)
+  - [No concurrency control](#no-concurrency-control)
+- [More Information](#more-information)
+  - [Connection Pool Sizing](#connection-pool-sizing)
+  - [Database Schema Updates](#database-schema-updates)
+  - [Configuration Validation](#configuration-validation)
+  - [Defaults](#defaults)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-concurrency-control`
 
 ## Context and Problem Statement

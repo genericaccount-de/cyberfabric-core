@@ -6,13 +6,11 @@
 //! Configuration types are now in the top-level `config` module.
 
 pub mod logging;
-pub mod metrics_provider;
 pub mod panic;
 pub mod paths;
 pub mod signals;
 
 pub use logging::*;
-pub use metrics_provider::*;
 pub use panic::*;
 pub use paths::{HomeDirError, expand_tilde, normalize_path};
 pub use signals::*;

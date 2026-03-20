@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use http::{Method, StatusCode};
 use oagw::test_support::{
     APIKEY_AUTH_PLUGIN_ID, AppHarness, MockBody, MockGuard, MockResponse, MockUpstream,
@@ -6,9 +8,10 @@ use oagw::test_support::{
 use oagw_sdk::Body;
 use oagw_sdk::api::ErrorSource;
 use oagw_sdk::{
-    BurstConfig, CreateRouteRequest, CreateUpstreamRequest, Endpoint, HttpMatch, HttpMethod,
-    MatchRules, PathSuffixMode, RateLimitAlgorithm, RateLimitConfig, RateLimitScope,
-    RateLimitStrategy, Scheme, Server, SharingMode, SustainedRate, Window,
+    BurstConfig, CreateRouteRequest, CreateUpstreamRequest, Endpoint, HeadersConfig, HttpMatch,
+    HttpMethod, MatchRules, PassthroughMode, PathSuffixMode, PluginBinding, PluginsConfig,
+    RateLimitAlgorithm, RateLimitConfig, RateLimitScope, RateLimitStrategy, RequestHeaderRules,
+    Scheme, Server, SharingMode, SustainedRate, Window,
 };
 use serde_json::json;
 
@@ -1694,6 +1697,365 @@ async fn proxy_streaming_body_exceeding_limit_returns_413() {
     }
 }
 
+// Body::Stream POST must reach the upstream intact via chunked transfer
+// encoding on the internal Pingora bridge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_streaming_body_post_arrives_intact() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/v1/upload",
+        MockResponse {
+            status: 200,
+            headers: vec![],
+            body: MockBody::Json(serde_json::json!({"received": true})),
+        },
+    );
+
+    let h = AppHarness::builder().build().await;
+    let ctx = h.security_context().clone();
+
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Http,
+                        host: "127.0.0.1".into(),
+                        port: h.mock_port(),
+                    }],
+                },
+                "gts.x.core.oagw.protocol.v1~x.core.oagw.http.v1",
+            )
+            .alias("stream-body-test")
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    h.facade()
+        .create_route(
+            ctx.clone(),
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![HttpMethod::Post],
+                        path: guard.path("/v1/upload"),
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    // Build a multi-chunk streaming body (simulates multipart/streaming upload).
+    let chunk_a = bytes::Bytes::from_static(b"hello ");
+    let chunk_b = bytes::Bytes::from_static(b"streamed ");
+    let chunk_c = bytes::Bytes::from_static(b"world");
+    let chunks: Vec<Result<bytes::Bytes, oagw_sdk::body::BoxError>> =
+        vec![Ok(chunk_a), Ok(chunk_b), Ok(chunk_c)];
+    let stream: oagw_sdk::body::BodyStream = Box::pin(futures_util::stream::iter(chunks));
+    let body = Body::Stream(stream);
+
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!("/stream-body-test{}/v1/upload", guard.prefix()))
+        .header(http::header::CONTENT_TYPE, "application/octet-stream")
+        .body(body)
+        .unwrap();
+
+    let resp = h.facade().proxy_request(ctx.clone(), req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "streaming POST should succeed"
+    );
+
+    // Verify the upstream mock received the complete, reassembled body.
+    let recorded = guard.recorded_requests().await;
+    assert_eq!(recorded.len(), 1, "expected exactly one recorded request");
+    assert_eq!(
+        recorded[0].body, b"hello streamed world",
+        "upstream must receive the full concatenated streaming body"
+    );
+}
+
+// Empty chunks in a Body::Stream must be silently skipped — writing a
+// zero-length chunk would emit the chunked terminator (0\r\n\r\n) and
+// prematurely end the body.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_streaming_body_with_empty_chunks_succeeds() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/v1/upload-empty",
+        MockResponse {
+            status: 200,
+            headers: vec![],
+            body: MockBody::Json(serde_json::json!({"received": true})),
+        },
+    );
+
+    let h = AppHarness::builder().build().await;
+    let ctx = h.security_context().clone();
+
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Http,
+                        host: "127.0.0.1".into(),
+                        port: h.mock_port(),
+                    }],
+                },
+                "gts.x.core.oagw.protocol.v1~x.core.oagw.http.v1",
+            )
+            .alias("stream-empty-chunks")
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    h.facade()
+        .create_route(
+            ctx.clone(),
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![HttpMethod::Post],
+                        path: guard.path("/v1/upload-empty"),
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    // Interleave real chunks with empty ones.
+    let chunks: Vec<Result<bytes::Bytes, oagw_sdk::body::BoxError>> = vec![
+        Ok(bytes::Bytes::new()), // empty — must be skipped
+        Ok(bytes::Bytes::from_static(b"AB")),
+        Ok(bytes::Bytes::new()), // empty — must be skipped
+        Ok(bytes::Bytes::new()), // empty — must be skipped
+        Ok(bytes::Bytes::from_static(b"CD")),
+        Ok(bytes::Bytes::new()), // trailing empty
+    ];
+    let stream: oagw_sdk::body::BodyStream = Box::pin(futures_util::stream::iter(chunks));
+    let body = Body::Stream(stream);
+
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/stream-empty-chunks{}/v1/upload-empty",
+            guard.prefix()
+        ))
+        .header(http::header::CONTENT_TYPE, "application/octet-stream")
+        .body(body)
+        .unwrap();
+
+    let resp = h.facade().proxy_request(ctx.clone(), req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "streaming POST with empty chunks should succeed"
+    );
+
+    let recorded = guard.recorded_requests().await;
+    assert_eq!(recorded.len(), 1, "expected exactly one recorded request");
+    assert_eq!(
+        recorded[0].body, b"ABCD",
+        "upstream must receive only the non-empty chunks, concatenated"
+    );
+}
+
+// Single-chunk streaming body (boundary condition).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_streaming_body_single_chunk() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/v1/upload",
+        MockResponse {
+            status: 200,
+            headers: vec![],
+            body: MockBody::Json(serde_json::json!({"received": true})),
+        },
+    );
+
+    let h = AppHarness::builder().build().await;
+    let ctx = h.security_context().clone();
+
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Http,
+                        host: "127.0.0.1".into(),
+                        port: h.mock_port(),
+                    }],
+                },
+                "gts.x.core.oagw.protocol.v1~x.core.oagw.http.v1",
+            )
+            .alias("stream-single-chunk")
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    h.facade()
+        .create_route(
+            ctx.clone(),
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![HttpMethod::Post],
+                        path: guard.path("/v1/upload"),
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    let chunks: Vec<Result<bytes::Bytes, oagw_sdk::body::BoxError>> =
+        vec![Ok(bytes::Bytes::from_static(b"single-payload"))];
+    let stream: oagw_sdk::body::BodyStream = Box::pin(futures_util::stream::iter(chunks));
+    let body = Body::Stream(stream);
+
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!("/stream-single-chunk{}/v1/upload", guard.prefix()))
+        .header(http::header::CONTENT_TYPE, "application/octet-stream")
+        .body(body)
+        .unwrap();
+
+    let resp = h.facade().proxy_request(ctx.clone(), req).await.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::OK,
+        "single-chunk streaming POST should succeed"
+    );
+
+    let recorded = guard.recorded_requests().await;
+    assert_eq!(recorded.len(), 1, "expected exactly one recorded request");
+    assert_eq!(
+        recorded[0].body, b"single-payload",
+        "upstream must receive the single chunk intact"
+    );
+}
+
+// A stream error mid-body sends the cause on the abort channel so the chunked
+// terminator is NOT written.  The main select! receives the reason immediately,
+// returning a DownstreamError without waiting for the request timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn proxy_streaming_body_error_mid_stream_does_not_send_terminator() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/v1/upload-err",
+        MockResponse {
+            status: 200,
+            headers: vec![],
+            body: MockBody::Json(serde_json::json!({"received": true})),
+        },
+    );
+
+    let h = AppHarness::builder().build().await;
+    let ctx = h.security_context().clone();
+
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Http,
+                        host: "127.0.0.1".into(),
+                        port: h.mock_port(),
+                    }],
+                },
+                "gts.x.core.oagw.protocol.v1~x.core.oagw.http.v1",
+            )
+            .alias("stream-err-test")
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    h.facade()
+        .create_route(
+            ctx.clone(),
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![HttpMethod::Post],
+                        path: guard.path("/v1/upload-err"),
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    // First chunk succeeds, second chunk is an error — triggers the abort channel.
+    let chunks: Vec<Result<bytes::Bytes, oagw_sdk::body::BoxError>> = vec![
+        Ok(bytes::Bytes::from_static(b"partial")),
+        Err(Box::new(std::io::Error::other("simulated stream failure"))),
+    ];
+    let stream: oagw_sdk::body::BodyStream = Box::pin(futures_util::stream::iter(chunks));
+    let body = Body::Stream(stream);
+
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!("/stream-err-test{}/v1/upload-err", guard.prefix()))
+        .header(http::header::CONTENT_TYPE, "application/octet-stream")
+        .body(body)
+        .unwrap();
+
+    match h.facade().proxy_request(ctx.clone(), req).await {
+        Err(err) => assert!(
+            matches!(
+                err,
+                oagw_sdk::error::ServiceGatewayError::DownstreamError { .. }
+            ),
+            "expected DownstreamError, got: {err:?}"
+        ),
+        Ok(resp) => panic!(
+            "expected DownstreamError, got response with status {}",
+            resp.status()
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // OAuth2 Client Credentials integration tests
 // ---------------------------------------------------------------------------
@@ -1913,4 +2275,557 @@ async fn proxy_oauth2_missing_credentials_returns_error() {
 
     // Should fail with a secret-not-found error.
     assert!(response.is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Guard plugin integration tests
+// ---------------------------------------------------------------------------
+
+const REQUIRED_HEADERS_GUARD_PLUGIN_ID: &str =
+    "gts.x.core.oagw.guard_plugin.v1~x.core.oagw.required_headers.v1";
+
+/// Verify that the RequiredHeadersGuardPlugin allows requests that include
+/// all required headers.
+#[tokio::test]
+async fn proxy_guard_allows_when_required_header_present() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/guard-hdr-ok",
+        MockResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: MockBody::Json(json!({"ok": true})),
+        },
+    );
+
+    let h = AppHarness::builder().build().await;
+    let ctx = h.security_context().clone();
+
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Http,
+                        host: "127.0.0.1".into(),
+                        port: h.mock_port(),
+                    }],
+                },
+                "gts.x.core.oagw.protocol.v1~x.core.oagw.http.v1",
+            )
+            .alias("guard-hdr-ok")
+            .headers(HeadersConfig {
+                request: Some(RequestHeaderRules {
+                    passthrough: PassthroughMode::All,
+                    ..Default::default()
+                }),
+                response: None,
+            })
+            .plugins(PluginsConfig {
+                sharing: SharingMode::Private,
+                items: vec![PluginBinding {
+                    plugin_ref: REQUIRED_HEADERS_GUARD_PLUGIN_ID.to_string(),
+                    config: [("required_request_headers".into(), "x-correlation-id".into())].into(),
+                }],
+            })
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    h.facade()
+        .create_route(
+            ctx.clone(),
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![HttpMethod::Post],
+                        path: guard.path("/guard-hdr-ok"),
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!("/guard-hdr-ok{}", guard.path("/guard-hdr-ok")))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header("x-correlation-id", "test-123")
+        .body(Body::from(r#"{"test": true}"#))
+        .unwrap();
+
+    let response = h.facade().proxy_request(ctx.clone(), req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// Verify that the RequiredHeadersGuardPlugin rejects requests missing a
+/// required header, returning a 400 GuardRejected error.
+#[tokio::test]
+async fn proxy_guard_rejects_missing_required_header() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/guard-hdr-miss",
+        MockResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: MockBody::Json(json!({"ok": true})),
+        },
+    );
+
+    let h = AppHarness::builder().build().await;
+    let ctx = h.security_context().clone();
+
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Http,
+                        host: "127.0.0.1".into(),
+                        port: h.mock_port(),
+                    }],
+                },
+                "gts.x.core.oagw.protocol.v1~x.core.oagw.http.v1",
+            )
+            .alias("guard-hdr-miss")
+            .plugins(PluginsConfig {
+                sharing: SharingMode::Private,
+                items: vec![PluginBinding {
+                    plugin_ref: REQUIRED_HEADERS_GUARD_PLUGIN_ID.to_string(),
+                    config: [("required_request_headers".into(), "x-correlation-id".into())].into(),
+                }],
+            })
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    h.facade()
+        .create_route(
+            ctx.clone(),
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![HttpMethod::Post],
+                        path: guard.path("/guard-hdr-miss"),
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    // Send request WITHOUT the required x-correlation-id header.
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!("/guard-hdr-miss{}", guard.path("/guard-hdr-miss")))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"test": true}"#))
+        .unwrap();
+
+    let err = h
+        .facade()
+        .proxy_request(ctx.clone(), req)
+        .await
+        .expect_err("guard should reject missing required header");
+
+    match err {
+        oagw_sdk::error::ServiceGatewayError::GuardRejected {
+            status, error_code, ..
+        } => {
+            assert_eq!(status, 400);
+            assert_eq!(error_code, "REQUIRED_HEADER_MISSING");
+        }
+        other => panic!("expected GuardRejected, got: {other:?}"),
+    }
+
+    // Verify the request never reached the upstream.
+    let recorded = guard.recorded_requests().await;
+    assert!(
+        recorded.is_empty(),
+        "rejected request should not reach upstream"
+    );
+}
+
+/// Verify that an unconfigured RequiredHeadersGuardPlugin allows all requests.
+#[tokio::test]
+async fn proxy_guard_allows_unconfigured() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/guard-hdr-noconf",
+        MockResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: MockBody::Json(json!({"ok": true})),
+        },
+    );
+
+    let h = AppHarness::builder().build().await;
+    let ctx = h.security_context().clone();
+
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Http,
+                        host: "127.0.0.1".into(),
+                        port: h.mock_port(),
+                    }],
+                },
+                "gts.x.core.oagw.protocol.v1~x.core.oagw.http.v1",
+            )
+            .alias("guard-hdr-noconf")
+            .plugins(PluginsConfig {
+                sharing: SharingMode::Private,
+                items: vec![PluginBinding {
+                    plugin_ref: REQUIRED_HEADERS_GUARD_PLUGIN_ID.to_string(),
+                    config: HashMap::new(),
+                }],
+            })
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    h.facade()
+        .create_route(
+            ctx.clone(),
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![HttpMethod::Post],
+                        path: guard.path("/guard-hdr-noconf"),
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/guard-hdr-noconf{}",
+            guard.path("/guard-hdr-noconf")
+        ))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"test": true}"#))
+        .unwrap();
+
+    let response = h.facade().proxy_request(ctx.clone(), req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------
+// Transform plugin integration tests
+// ---------------------------------------------------------------------------
+
+const REQUEST_ID_TRANSFORM_PLUGIN_ID: &str =
+    "gts.x.core.oagw.transform_plugin.v1~x.core.oagw.request_id.v1";
+
+/// Verify that the RequestIdTransformPlugin injects an X-Request-ID header when
+/// the inbound request does not include one.
+#[tokio::test]
+async fn proxy_transform_injects_request_id() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/transform-test",
+        MockResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: MockBody::Json(json!({"ok": true})),
+        },
+    );
+
+    let h = AppHarness::builder().build().await;
+    let ctx = h.security_context().clone();
+
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Http,
+                        host: "127.0.0.1".into(),
+                        port: h.mock_port(),
+                    }],
+                },
+                "gts.x.core.oagw.protocol.v1~x.core.oagw.http.v1",
+            )
+            .alias("transform-inject")
+            .plugins(PluginsConfig {
+                sharing: SharingMode::Private,
+                items: vec![PluginBinding {
+                    plugin_ref: REQUEST_ID_TRANSFORM_PLUGIN_ID.to_string(),
+                    config: Default::default(),
+                }],
+            })
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    h.facade()
+        .create_route(
+            ctx.clone(),
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![HttpMethod::Post],
+                        path: guard.path("/transform-test"),
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    // Send request WITHOUT X-Request-ID.
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/transform-inject{}",
+            guard.path("/transform-test")
+        ))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"test": true}"#))
+        .unwrap();
+
+    let response = h.facade().proxy_request(ctx.clone(), req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The mock upstream should have received the request WITH an X-Request-ID.
+    let recorded = guard.recorded_requests().await;
+    assert_eq!(recorded.len(), 1);
+    let has_request_id = recorded[0]
+        .headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("x-request-id"));
+    assert!(
+        has_request_id,
+        "upstream should have received x-request-id header injected by transform plugin"
+    );
+}
+
+/// Verify that the RequestIdTransformPlugin preserves an existing X-Request-ID
+/// from the inbound request (does not overwrite it).
+#[tokio::test]
+async fn proxy_transform_preserves_request_id() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/transform-preserve",
+        MockResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: MockBody::Json(json!({"ok": true})),
+        },
+    );
+
+    let h = AppHarness::builder().build().await;
+    let ctx = h.security_context().clone();
+
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Http,
+                        host: "127.0.0.1".into(),
+                        port: h.mock_port(),
+                    }],
+                },
+                "gts.x.core.oagw.protocol.v1~x.core.oagw.http.v1",
+            )
+            .alias("transform-preserve")
+            .headers(HeadersConfig {
+                request: Some(RequestHeaderRules {
+                    passthrough: PassthroughMode::All,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+            .plugins(PluginsConfig {
+                sharing: SharingMode::Private,
+                items: vec![PluginBinding {
+                    plugin_ref: REQUEST_ID_TRANSFORM_PLUGIN_ID.to_string(),
+                    config: Default::default(),
+                }],
+            })
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    h.facade()
+        .create_route(
+            ctx.clone(),
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![HttpMethod::Post],
+                        path: guard.path("/transform-preserve"),
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    // Send request WITH an existing X-Request-ID.
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/transform-preserve{}",
+            guard.path("/transform-preserve")
+        ))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .header("x-request-id", "custom-trace-id-999")
+        .body(Body::from(r#"{"test": true}"#))
+        .unwrap();
+
+    let response = h.facade().proxy_request(ctx.clone(), req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The mock upstream should have received the ORIGINAL X-Request-ID.
+    let recorded = guard.recorded_requests().await;
+    assert_eq!(recorded.len(), 1);
+    let request_id = recorded[0]
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("x-request-id"))
+        .map(|(_, v)| v.as_str());
+    assert_eq!(
+        request_id,
+        Some("custom-trace-id-999"),
+        "upstream should have received the original x-request-id, not a generated one"
+    );
+}
+
+/// Verify that a failing transform plugin (unknown GTS ID) does not block the
+/// proxy pipeline — the request still succeeds (log-and-continue).
+#[tokio::test]
+async fn proxy_transform_error_continues_pipeline() {
+    let mut guard = MockGuard::new();
+    guard.mock(
+        "POST",
+        "/transform-error",
+        MockResponse {
+            status: 200,
+            headers: vec![("content-type".into(), "application/json".into())],
+            body: MockBody::Json(json!({"ok": true})),
+        },
+    );
+
+    let h = AppHarness::builder().build().await;
+    let ctx = h.security_context().clone();
+
+    // Bind a non-existent transform plugin — resolution will fail.
+    let upstream = h
+        .facade()
+        .create_upstream(
+            ctx.clone(),
+            CreateUpstreamRequest::builder(
+                Server {
+                    endpoints: vec![Endpoint {
+                        scheme: Scheme::Http,
+                        host: "127.0.0.1".into(),
+                        port: h.mock_port(),
+                    }],
+                },
+                "gts.x.core.oagw.protocol.v1~x.core.oagw.http.v1",
+            )
+            .alias("transform-error")
+            .plugins(PluginsConfig {
+                sharing: SharingMode::Private,
+                items: vec![PluginBinding {
+                    plugin_ref: "gts.x.core.oagw.transform_plugin.v1~x.core.oagw.nonexistent.v1"
+                        .to_string(),
+                    config: Default::default(),
+                }],
+            })
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    h.facade()
+        .create_route(
+            ctx.clone(),
+            CreateRouteRequest::builder(
+                upstream.id,
+                MatchRules {
+                    http: Some(HttpMatch {
+                        methods: vec![HttpMethod::Post],
+                        path: guard.path("/transform-error"),
+                        query_allowlist: vec![],
+                        path_suffix_mode: PathSuffixMode::Disabled,
+                    }),
+                    grpc: None,
+                },
+            )
+            .build(),
+        )
+        .await
+        .unwrap();
+
+    // Request should succeed despite the broken transform plugin.
+    let req = http::Request::builder()
+        .method(Method::POST)
+        .uri(format!(
+            "/transform-error{}",
+            guard.path("/transform-error")
+        ))
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"test": true}"#))
+        .unwrap();
+
+    let response = h.facade().proxy_request(ctx.clone(), req).await.unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::OK,
+        "pipeline should continue despite transform resolution failure"
+    );
 }

@@ -22,7 +22,7 @@ pub fn register_routes(
             "Returns a list of all compiled-in and out-of-process modules with their \
          capabilities, dependencies, running instances, and deployment mode.",
         )
-        .tag("module-orchestrator")
+        .tag("Module Orchestrator")
         .authenticated()
         .no_license_required()
         .handler(handlers::list_modules)

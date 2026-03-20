@@ -9,16 +9,20 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info, warn};
 use uuid::Uuid;
 
+use mini_chat_sdk::RequesterType;
+
 use crate::config::{ContextConfig, StreamingConfig};
 use crate::domain::error::DomainError;
 use crate::domain::llm::{ToolPhase, Usage};
 use crate::domain::models::ResolvedModel;
+use crate::domain::ports::MiniChatMetricsPort;
+use crate::domain::ports::metric_labels::{decision, period, stage, trigger};
 use crate::domain::repos::{
     AttachmentRepository, ChatRepository, CreateTurnParams, InsertUserMessageParams,
     MessageAttachmentRepository, MessageRepository, QuotaUsageRepository, SnapshotBoundary,
     ThreadSummaryRepository, TurnRepository, VectorStoreRepository,
 };
-use crate::domain::stream_events::{DoneData, ErrorData, StreamEvent};
+use crate::domain::stream_events::{DoneData, ErrorData, StreamEvent, StreamStartedData};
 use crate::infra::db::entity::chat_turn::{Model as TurnModel, TurnState};
 use crate::infra::llm::{
     ClientSseEvent, LlmMessage, LlmProvider, LlmProviderError, LlmRequestBuilder, LlmTool,
@@ -26,6 +30,19 @@ use crate::infra::llm::{
 };
 
 use super::{DbProvider, actions, resources};
+
+// ── RAII guard for active_streams gauge ──────────────────────────────────
+
+/// Ensures `decrement_active_streams` is always called when the guard is
+/// dropped, even if a new exit path is added without an explicit decrement.
+#[domain_model]
+struct ActiveStreamGuard(Arc<dyn MiniChatMetricsPort>);
+
+impl Drop for ActiveStreamGuard {
+    fn drop(&mut self) {
+        self.0.decrement_active_streams();
+    }
+}
 
 // ── Typed error for attachment validation inside TX boundary ─────────────
 
@@ -160,7 +177,8 @@ struct FinalizationCtx<TR: TurnRepository + 'static, MR: MessageRepository + 'st
     chat_id: Uuid,
     request_id: Uuid,
     user_id: Uuid,
-    /// Pre-generated assistant message ID, also sent in `DoneData`.
+    requester_type: RequesterType,
+    /// Pre-generated assistant message ID, sent in `StreamStartedData` (`stream_started` event).
     message_id: Uuid,
     // ── Quota/preflight fields (from PreflightDecision) ──
     effective_model: String,
@@ -177,6 +195,12 @@ struct FinalizationCtx<TR: TurnRepository + 'static, MR: MessageRepository + 'st
         crate::infra::db::entity::quota_usage::PeriodType,
         time::Date,
     )>,
+    /// Provider ID for metrics labels.
+    provider_id: String,
+    /// Metrics port for recording stream metrics in the spawned task.
+    metrics: Arc<dyn MiniChatMetricsPort>,
+    /// Quota warnings provider for computing `quota_warnings` in the `done` event.
+    quota_warnings_provider: Arc<dyn crate::domain::service::quota_settler::QuotaWarningsProvider>,
 }
 
 impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> FinalizationCtx<TR, MR> {
@@ -191,6 +215,8 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
         error_detail: Option<String>,
         provider_response_id: Option<String>,
         web_search_calls: u32,
+        ttft_ms: Option<u64>,
+        total_ms: Option<u64>,
     ) -> crate::domain::model::finalization::FinalizationInput {
         crate::domain::model::finalization::FinalizationInput {
             turn_id: self.turn_id,
@@ -198,6 +224,7 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
             chat_id: self.chat_id,
             request_id: self.request_id,
             user_id: self.user_id,
+            requester_type: self.requester_type,
             scope: self.scope.clone(),
             message_id: self.message_id,
             terminal_state,
@@ -218,6 +245,8 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
             downgrade_reason: self.downgrade_reason.clone(),
             period_starts: self.period_starts.clone(),
             web_search_calls,
+            ttft_ms,
+            total_ms,
         }
     }
 }
@@ -225,6 +254,14 @@ impl<TR: TurnRepository + 'static, MR: MessageRepository + 'static> Finalization
 // ════════════════════════════════════════════════════════════════════════════
 // Error normalization
 // ════════════════════════════════════════════════════════════════════════════
+
+/// Map an optional subject-type string from [`SecurityContext`] to [`RequesterType`].
+fn requester_type_from_str(s: Option<&str>) -> RequesterType {
+    match s {
+        Some("system") => RequesterType::System,
+        _ => RequesterType::User,
+    }
+}
 
 /// Normalize an [`LlmProviderError`] to a `(code, message)` pair for the SSE
 /// error event. Messages are already sanitized by the infra layer.
@@ -275,6 +312,8 @@ struct PreflightResult {
     system_prompt: String,
     context_window: u32,
     estimation_budgets: crate::config::EstimationBudgets,
+    max_retrieved_chunks_per_turn: u32,
+    max_tool_calls: u32,
 }
 
 /// Convert a `PreflightDecision` into a flat `PreflightResult` or a `StreamError`.
@@ -293,6 +332,8 @@ fn flatten_preflight(
             system_prompt,
             context_window,
             estimation_budgets,
+            max_retrieved_chunks_per_turn,
+            max_tool_calls,
             ..
         } => Ok(PreflightResult {
             effective_model,
@@ -307,6 +348,8 @@ fn flatten_preflight(
             system_prompt,
             context_window,
             estimation_budgets,
+            max_retrieved_chunks_per_turn,
+            max_tool_calls,
         }),
         PreflightDecision::Downgrade {
             effective_model,
@@ -320,6 +363,8 @@ fn flatten_preflight(
             system_prompt,
             context_window,
             estimation_budgets,
+            max_retrieved_chunks_per_turn,
+            max_tool_calls,
             ..
         } => Ok(PreflightResult {
             effective_model,
@@ -334,6 +379,8 @@ fn flatten_preflight(
             system_prompt,
             context_window,
             estimation_budgets,
+            max_retrieved_chunks_per_turn,
+            max_tool_calls,
         }),
         PreflightDecision::Reject {
             error_code,
@@ -382,6 +429,7 @@ pub struct StreamService<
     vector_store_repo: Arc<VSR>,
     message_attachment_repo: Arc<MAR>,
     context_config: ContextConfig,
+    metrics: Arc<dyn MiniChatMetricsPort>,
 }
 
 impl<
@@ -413,6 +461,7 @@ impl<
         vector_store_repo: Arc<VSR>,
         message_attachment_repo: Arc<MAR>,
         context_config: ContextConfig,
+        metrics: Arc<dyn MiniChatMetricsPort>,
     ) -> Self {
         Self {
             db,
@@ -429,12 +478,41 @@ impl<
             vector_store_repo,
             message_attachment_repo,
             context_config,
+            metrics,
         }
     }
 
     /// The configured channel capacity for the provider->writer mpsc channel.
     pub(crate) fn channel_capacity(&self) -> usize {
         usize::from(self.streaming_config.sse_channel_capacity)
+    }
+
+    /// Record quota preflight decision metrics.
+    fn record_preflight_metrics(
+        &self,
+        computed: &super::quota_service::PreflightComputed,
+        selected_model: &str,
+    ) {
+        use crate::domain::model::quota::PreflightDecision;
+        let tier = computed.effective_tier();
+        match &computed.decision {
+            PreflightDecision::Allow {
+                effective_model, ..
+            } => {
+                self.metrics
+                    .record_quota_preflight(decision::ALLOW, effective_model, tier);
+            }
+            PreflightDecision::Downgrade {
+                effective_model, ..
+            } => {
+                self.metrics
+                    .record_quota_preflight(decision::DOWNGRADE, effective_model, tier);
+            }
+            PreflightDecision::Reject { .. } => {
+                self.metrics
+                    .record_quota_preflight(decision::REJECT, selected_model, tier);
+            }
+        }
     }
 
     /// The configured ping interval in seconds.
@@ -474,10 +552,11 @@ impl<
         let user_id = ctx.subject_id();
 
         // ── Authorization ──
-        let scope = self
+        let chat_scope = self
             .enforcer
             .access_scope(&ctx, &resources::CHAT, actions::SEND_MESSAGE, Some(chat_id))
-            .await?;
+            .await?
+            .ensure_owner(ctx.subject_id());
 
         // Non-transactional connection for pre-stream checks (D6)
         let conn = self
@@ -489,12 +568,12 @@ impl<
 
         // ── Verify chat exists (scoped) ──
         self.chat_repo
-            .get(&conn, &scope, chat_id)
+            .get(&conn, &chat_scope, chat_id)
             .await
             .map_err(|e| StreamError::TurnCreationFailed { source: e })?
             .ok_or(StreamError::ChatNotFound { chat_id })?;
 
-        let scope = scope.tenant_only();
+        let scope = chat_scope.tenant_only();
 
         // ── Idempotency check (DESIGN §3.7 Check Priority Order) ──
         if let Some(existing_turn) = self
@@ -559,10 +638,20 @@ impl<
                 other => StreamError::TurnCreationFailed { source: other },
             })?;
 
+        // Metrics: quota preflight decision (before flatten so rejects are counted)
+        self.record_preflight_metrics(&computed, &selected_model);
+
         let pf = flatten_preflight(computed.decision.clone())?;
+
+        // Metrics: estimated tokens (only on allow/downgrade)
+        #[allow(clippy::cast_precision_loss)]
+        self.metrics
+            .record_quota_estimated_tokens(pf.reserve_tokens as f64);
+
         // Period boundaries from the computed preflight (used by finalization for settlement)
         let period_starts = computed.periods.clone();
         let file_search_disabled = computed.kill_switches.disable_file_search;
+        let has_reserve_buckets = !computed.buckets.is_empty();
 
         // ── Retrieval mode determination ──
         let ready_doc_count = self
@@ -632,7 +721,18 @@ impl<
             )
             .await?;
 
-        // Pre-generate assistant message ID (sent in DoneData and used in CAS)
+        // Metrics: quota reserve committed (one per period)
+        if has_reserve_buckets {
+            for (period_type, _) in &period_starts {
+                let label = match period_type {
+                    crate::infra::db::entity::quota_usage::PeriodType::Daily => period::DAILY,
+                    crate::infra::db::entity::quota_usage::PeriodType::Monthly => period::MONTHLY,
+                };
+                self.metrics.record_quota_reserve(label);
+            }
+        }
+
+        // Pre-generate assistant message ID (sent in StreamStartedData and used in CAS)
         let message_id = Uuid::new_v4();
 
         let finalization_ctx = FinalizationCtx {
@@ -643,6 +743,7 @@ impl<
             chat_id,
             request_id,
             user_id,
+            requester_type: requester_type_from_str(ctx.subject_type()),
             message_id,
             effective_model: pf.effective_model.clone(),
             selected_model: selected_model.clone(),
@@ -655,6 +756,10 @@ impl<
             downgrade_from: pf.downgrade_from,
             downgrade_reason: pf.downgrade_reason,
             period_starts,
+            provider_id: provider_id.clone(),
+            metrics: Arc::clone(&self.metrics),
+            quota_warnings_provider: Arc::clone(&self.quota)
+                as Arc<dyn crate::domain::service::quota_settler::QuotaWarningsProvider>,
         };
 
         // ── Context assembly ──
@@ -676,6 +781,8 @@ impl<
                 file_search_enabled,
                 &vector_store_ids,
                 None, // file_search_filters: wired by P4-6
+                self.streaming_config.web_search_context_size,
+                pf.max_retrieved_chunks_per_turn,
                 token_budget,
             )
             .await?;
@@ -694,6 +801,8 @@ impl<
             .replace("{model}", &provider_model_id);
         let proxy_path = format!("{}{api_path}", resolved_provider.upstream_alias);
 
+        emit_stream_started(&tx, request_id, message_id).await;
+
         Ok(spawn_provider_task(
             resolved_provider.adapter,
             proxy_path,
@@ -704,6 +813,7 @@ impl<
             model,
             provider_model_id,
             pf.max_output_tokens_applied.cast_unsigned(),
+            pf.max_tool_calls,
             self.quota.web_search_max_calls_per_message(),
             cancel,
             tx,
@@ -941,6 +1051,8 @@ impl<
         file_search_enabled: bool,
         vector_store_ids: &[String],
         file_search_filters: Option<crate::domain::llm::FileSearchFilter>,
+        web_search_context_size: crate::domain::llm::WebSearchContextSize,
+        file_search_max_num_results: u32,
         token_budget: Option<super::context_assembly::TokenBudget>,
     ) -> Result<super::context_assembly::AssembledContext, StreamError> {
         let conn = self
@@ -1015,6 +1127,8 @@ impl<
             file_search_enabled,
             vector_store_ids,
             file_search_filters,
+            web_search_context_size,
+            file_search_max_num_results,
             token_budget,
         })
         .map_err(|e| StreamError::ContextBudgetExceeded {
@@ -1040,7 +1154,11 @@ impl<
     /// the provider, and spawns the streaming task.
     ///
     /// Per design D3: mutation transaction commits first, streaming runs post-commit.
-    #[allow(clippy::too_many_arguments)]
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::cognitive_complexity
+    )]
     pub(crate) async fn run_stream_for_mutation(
         &self,
         ctx: SecurityContext,
@@ -1081,7 +1199,16 @@ impl<
                 other => StreamError::TurnCreationFailed { source: other },
             })?;
 
+        // Metrics: quota preflight decision (before flatten so rejects are counted)
+        self.record_preflight_metrics(&computed, &selected_model);
+
         let pf = flatten_preflight(computed.decision.clone())?;
+
+        // Metrics: estimated tokens (only on allow/downgrade)
+        #[allow(clippy::cast_precision_loss)]
+        self.metrics
+            .record_quota_estimated_tokens(pf.reserve_tokens as f64);
+
         let period_starts = computed.periods.clone();
         let file_search_disabled = computed.kill_switches.disable_file_search;
 
@@ -1123,6 +1250,15 @@ impl<
                 .map_err(|e| StreamError::TurnCreationFailed {
                     source: DomainError::database(e.to_string()),
                 })?;
+
+            // Metrics: quota reserve committed (one per period)
+            for (period_type, _) in &period_starts {
+                let label = match period_type {
+                    crate::infra::db::entity::quota_usage::PeriodType::Daily => period::DAILY,
+                    crate::infra::db::entity::quota_usage::PeriodType::Monthly => period::MONTHLY,
+                };
+                self.metrics.record_quota_reserve(label);
+            }
         }
 
         // ── Retrieval mode determination ──
@@ -1190,6 +1326,7 @@ impl<
             chat_id,
             request_id,
             user_id,
+            requester_type: requester_type_from_str(ctx.subject_type()),
             message_id,
             effective_model: pf.effective_model.clone(),
             selected_model: selected_model.clone(),
@@ -1202,6 +1339,10 @@ impl<
             downgrade_from: pf.downgrade_from,
             downgrade_reason: pf.downgrade_reason,
             period_starts,
+            provider_id: provider_id.clone(),
+            metrics: Arc::clone(&self.metrics),
+            quota_warnings_provider: Arc::clone(&self.quota)
+                as Arc<dyn crate::domain::service::quota_settler::QuotaWarningsProvider>,
         };
 
         // ── Context assembly ──
@@ -1223,6 +1364,8 @@ impl<
                 file_search_enabled,
                 &vector_store_ids,
                 None, // file_search_filters: wired by P4-6
+                self.streaming_config.web_search_context_size,
+                pf.max_retrieved_chunks_per_turn,
                 token_budget,
             )
             .await?;
@@ -1239,6 +1382,8 @@ impl<
             .replace("{model}", &provider_model_id);
         let proxy_path = format!("{}{api_path}", resolved_provider.upstream_alias);
 
+        emit_stream_started(&tx, request_id, message_id).await;
+
         Ok(spawn_provider_task(
             resolved_provider.adapter,
             proxy_path,
@@ -1249,6 +1394,7 @@ impl<
             pf.effective_model,
             provider_model_id,
             pf.max_output_tokens_applied.cast_unsigned(),
+            pf.max_tool_calls,
             self.quota.web_search_max_calls_per_message(),
             cancel,
             tx,
@@ -1262,6 +1408,21 @@ impl<
 /// a [`StreamOutcome`]. After the stream ends, atomically finalizes the turn
 /// via `FinalizationService::finalize_turn_cas()` if a context is provided.
 ///
+/// Emit `stream_started` before handing `tx` to the provider task (D3).
+async fn emit_stream_started(tx: &mpsc::Sender<StreamEvent>, request_id: Uuid, message_id: Uuid) {
+    if tx
+        .send(StreamEvent::StreamStarted(StreamStartedData {
+            request_id,
+            message_id,
+            is_new_turn: true,
+        }))
+        .await
+        .is_err()
+    {
+        warn!(%request_id, "stream_started send failed (client disconnected before first event)");
+    }
+}
+
 /// All five terminal paths (provider done, incomplete, provider error,
 /// client disconnect, pre-stream error) route through `finalize_turn_cas()`.
 /// SSE terminal events (Done/Error) are emitted only after the CAS winner
@@ -1283,11 +1444,12 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
     model: String,
     provider_model_id: String,
     max_output_tokens: u32,
+    max_tool_calls: u32,
     web_search_max_calls: u32,
     cancel: CancellationToken,
     tx: mpsc::Sender<StreamEvent>,
     fin_ctx: Option<FinalizationCtx<TR, MR>>,
-    provider_file_id_map: std::collections::HashMap<String, Uuid>,
+    provider_file_id_map: std::collections::HashMap<String, crate::domain::llm::AttachmentRef>,
 ) -> tokio::task::JoinHandle<StreamOutcome> {
     let span = if let Some(ref fctx) = fin_ctx {
         tracing::info_span!(
@@ -1304,12 +1466,23 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
     tokio::spawn(async move {
         let stream_start = std::time::Instant::now();
         let mut first_token_time: Option<std::time::Duration> = None;
-        let msg_id_str = fin_ctx.as_ref().map(|p| p.message_id.to_string());
+
+        // ── Metrics: stream started + active gauge ──
+        // ActiveStreamGuard ensures decrement on every exit path (Drop-based).
+        let _stream_guard = if let Some(ref fctx) = fin_ctx {
+            fctx.metrics
+                .record_stream_started(&fctx.provider_id, &fctx.effective_model);
+            fctx.metrics.increment_active_streams();
+            Some(ActiveStreamGuard(Arc::clone(&fctx.metrics)))
+        } else {
+            None
+        };
 
         // Build the LLM request using provider_model_id (the actual provider-facing name)
         let mut builder = LlmRequestBuilder::new(&provider_model_id)
             .messages(messages)
-            .max_output_tokens(u64::from(max_output_tokens));
+            .max_output_tokens(u64::from(max_output_tokens))
+            .max_tool_calls(max_tool_calls);
         if let Some(instructions) = system_instructions {
             builder = builder.system_instructions(instructions);
         }
@@ -1343,6 +1516,8 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                         None,
                         None,
                         0,
+                        None,
+                        None,
                     );
                     match fctx.finalization_svc.finalize_turn_cas(input).await {
                         Ok(outcome) if outcome.won_cas => {
@@ -1374,6 +1549,13 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                         .await;
                 }
 
+                // Metrics: pre-stream failure
+                if let Some(ref fctx) = fin_ctx {
+                    let ms = stream_start.elapsed().as_secs_f64() * 1000.0;
+                    fctx.metrics.record_stream_failed(&fctx.provider_id, &fctx.effective_model, &code);
+                    fctx.metrics.record_stream_total_latency_ms(&fctx.provider_id, &fctx.effective_model, ms);
+                }
+
                 return StreamOutcome {
                     terminal: StreamTerminal::Failed,
                     accumulated_text: String::new(),
@@ -1403,6 +1585,15 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
 
                 () = cancel.cancelled() => {
                     debug!("stream cancelled, aborting provider");
+                    if let Some(ref fctx) = fin_ctx {
+                        fctx.metrics.record_cancel_requested(trigger::DISCONNECT);
+                        let disconnect_stage = if first_token_time.is_none() {
+                            stage::BEFORE_FIRST_TOKEN
+                        } else {
+                            stage::MID_STREAM
+                        };
+                        fctx.metrics.record_stream_disconnected(disconnect_stage);
+                    }
                     provider_stream.cancel();
                     cancelled = true;
                     break;
@@ -1411,6 +1602,9 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                 event = provider_stream.next() => {
                     match event {
                         Some(Ok(client_event)) => {
+                            let is_first_token = matches!(client_event, ClientSseEvent::Delta { .. })
+                                && first_token_time.is_none();
+
                             if let ClientSseEvent::Delta { ref content, .. } = client_event {
                                 if first_token_time.is_none() {
                                     let ttft = stream_start.elapsed();
@@ -1419,6 +1613,10 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                                         time_to_first_token_ms = ttft.as_millis() as u64,
                                         "first token received"
                                     );
+                                    if let Some(ref fctx) = fin_ctx {
+                                        let ms = ttft.as_secs_f64() * 1000.0;
+                                        fctx.metrics.record_ttft_provider_ms(&fctx.provider_id, &fctx.effective_model, ms);
+                                    }
                                 }
                                 accumulated_text.push_str(content);
                             }
@@ -1449,6 +1647,8 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                                                     None,
                                                     None,
                                                     web_search_completed_count,
+                                                    None,
+                                                    None,
                                                 );
                                                 match fctx.finalization_svc.finalize_turn_cas(input).await {
                                                     Ok(outcome) if outcome.won_cas => {
@@ -1474,6 +1674,22 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                                             }
 
                                             provider_stream.cancel();
+
+                                            // Metrics: web search limit exceeded
+                                            if let Some(ref fctx) = fin_ctx {
+                                                let ms = stream_start.elapsed().as_secs_f64() * 1000.0;
+                                                fctx.metrics.record_stream_failed(
+                                                    &fctx.provider_id,
+                                                    &fctx.effective_model,
+                                                    &code,
+                                                );
+                                                fctx.metrics.record_stream_total_latency_ms(
+                                                    &fctx.provider_id,
+                                                    &fctx.effective_model,
+                                                    ms,
+                                                );
+                                            }
+
                                             let has_partial = !accumulated_text.is_empty();
                                             return StreamOutcome {
                                                 terminal: StreamTerminal::Failed,
@@ -1498,6 +1714,20 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                                 info!("channel closed (client disconnect), exiting provider task");
                                 break;
                             }
+
+                            // TTFT overhead: time from provider first-byte to channel send.
+                            if is_first_token
+                                && let (Some(fctx), Some(provider_ttft)) =
+                                    (&fin_ctx, first_token_time)
+                                {
+                                    let total = stream_start.elapsed().as_secs_f64() * 1000.0;
+                                    let provider_ms = provider_ttft.as_secs_f64() * 1000.0;
+                                    fctx.metrics.record_ttft_overhead_ms(
+                                        &fctx.provider_id,
+                                        &fctx.effective_model,
+                                        total - provider_ms,
+                                    );
+                                }
                         }
                         Some(Err(e)) => {
                             warn!(error = %e, "provider stream error");
@@ -1506,6 +1736,7 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
 
                             // Finalize first, emit error only if CAS winner (D3)
                             if let Some(ref fctx) = fin_ctx {
+                                let mid_elapsed = stream_start.elapsed();
                                 let input = fctx.to_finalization_input(
                                     TurnState::Failed,
                                     &accumulated_text,
@@ -1514,6 +1745,8 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                                     None,
                                     None,
                                     web_search_completed_count,
+                                    first_token_time.map(|d| d.as_millis() as u64),
+                                    Some(mid_elapsed.as_millis() as u64),
                                 );
                                 match fctx.finalization_svc.finalize_turn_cas(input).await {
                                     Ok(outcome) if outcome.won_cas => {
@@ -1542,6 +1775,13 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                                         message,
                                     }))
                                     .await;
+                            }
+
+                            // Metrics: mid-stream failure
+                            if let Some(ref fctx) = fin_ctx {
+                                let ms = stream_start.elapsed().as_secs_f64() * 1000.0;
+                                fctx.metrics.record_stream_failed(&fctx.provider_id, &fctx.effective_model, &code);
+                                fctx.metrics.record_stream_total_latency_ms(&fctx.provider_id, &fctx.effective_model, ms);
                             }
 
                             provider_stream.cancel();
@@ -1583,10 +1823,18 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                     None,
                     None,
                     web_search_completed_count,
+                    first_token_time.map(|d| d.as_millis() as u64),
+                    Some(elapsed.as_millis() as u64),
                 );
                 if let Err(e) = fctx.finalization_svc.finalize_turn_cas(input).await {
                     warn!(error = %e, "finalization failed on cancelled stream");
                 }
+
+                // Metrics: cancelled stream
+                let ms = elapsed.as_secs_f64() * 1000.0;
+                fctx.metrics.record_cancel_effective(trigger::DISCONNECT);
+                fctx.metrics.record_time_to_abort_ms(trigger::DISCONNECT, ms);
+                fctx.metrics.record_stream_total_latency_ms(&fctx.provider_id, &fctx.effective_model, ms);
             }
 
             return StreamOutcome {
@@ -1630,6 +1878,8 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                         None,
                         Some(response_id.clone()),
                         web_search_completed_count,
+                        first_token_time.map(|d| d.as_millis() as u64),
+                        Some(elapsed.as_millis() as u64),
                     );
                     match fctx.finalization_svc.finalize_turn_cas(input).await {
                         Ok(outcome) if outcome.won_cas => {
@@ -1647,15 +1897,27 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                                     ))
                                     .await;
                             }
+                            // Compute quota warnings post-commit (advisory, best-effort)
+                            let quota_warnings = match fctx
+                                .quota_warnings_provider
+                                .get_quota_warnings(&fctx.scope, fctx.tenant_id, fctx.user_id)
+                                .await
+                            {
+                                Ok(w) => Some(w),
+                                Err(e) => {
+                                    warn!(error = %e, "failed to compute quota_warnings");
+                                    None
+                                }
+                            };
                             let _ = tx
                                 .send(StreamEvent::Done(Box::new(DoneData {
-                                    message_id: msg_id_str.clone(),
                                     usage: Some(usage),
                                     effective_model: fctx.effective_model.clone(),
                                     selected_model: fctx.selected_model.clone(),
                                     quota_decision: fctx.quota_decision.clone(),
                                     downgrade_from: fctx.downgrade_from.clone(),
                                     downgrade_reason: fctx.downgrade_reason.clone(),
+                                    quota_warnings,
                                 })))
                                 .await;
                         }
@@ -1665,13 +1927,13 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                             // Emit Done anyway so client isn't left hanging
                             let _ = tx
                                 .send(StreamEvent::Done(Box::new(DoneData {
-                                    message_id: msg_id_str.clone(),
                                     usage: Some(usage),
                                     effective_model: fctx.effective_model.clone(),
                                     selected_model: fctx.selected_model.clone(),
                                     quota_decision: "allow".into(),
                                     downgrade_from: None,
                                     downgrade_reason: None,
+                                    quota_warnings: None,
                                 })))
                                 .await;
                         }
@@ -1691,15 +1953,22 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                     }
                     let _ = tx
                         .send(StreamEvent::Done(Box::new(DoneData {
-                            message_id: msg_id_str.clone(),
                             usage: Some(usage),
                             effective_model: model.clone(),
                             selected_model: model.clone(),
                             quota_decision: "allow".into(),
                             downgrade_from: None,
                             downgrade_reason: None,
+                            quota_warnings: None,
                         })))
                         .await;
+                }
+
+                // Metrics: completed stream
+                if let Some(ref fctx) = fin_ctx {
+                    let ms = stream_start.elapsed().as_secs_f64() * 1000.0;
+                    fctx.metrics.record_stream_completed(&fctx.provider_id, &fctx.effective_model);
+                    fctx.metrics.record_stream_total_latency_ms(&fctx.provider_id, &fctx.effective_model, ms);
                 }
 
                 StreamOutcome {
@@ -1733,18 +2002,31 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                         None,
                         None,
                         web_search_completed_count,
+                        first_token_time.map(|d| d.as_millis() as u64),
+                        Some(elapsed.as_millis() as u64),
                     );
                     match fctx.finalization_svc.finalize_turn_cas(input).await {
                         Ok(outcome) if outcome.won_cas => {
+                            let quota_warnings = match fctx
+                                .quota_warnings_provider
+                                .get_quota_warnings(&fctx.scope, fctx.tenant_id, fctx.user_id)
+                                .await
+                            {
+                                Ok(w) => Some(w),
+                                Err(e) => {
+                                    warn!(error = %e, "failed to compute quota_warnings");
+                                    None
+                                }
+                            };
                             let _ = tx
                                 .send(StreamEvent::Done(Box::new(DoneData {
-                                    message_id: msg_id_str.clone(),
                                     usage: Some(usage),
                                     effective_model: fctx.effective_model.clone(),
                                     selected_model: fctx.selected_model.clone(),
                                     quota_decision: fctx.quota_decision.clone(),
                                     downgrade_from: fctx.downgrade_from.clone(),
                                     downgrade_reason: fctx.downgrade_reason.clone(),
+                                    quota_warnings,
                                 })))
                                 .await;
                         }
@@ -1753,13 +2035,13 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                             warn!(error = %fe, "finalization failed on incomplete stream");
                             let _ = tx
                                 .send(StreamEvent::Done(Box::new(DoneData {
-                                    message_id: msg_id_str.clone(),
                                     usage: Some(usage),
                                     effective_model: fctx.effective_model.clone(),
                                     selected_model: fctx.selected_model.clone(),
                                     quota_decision: "allow".into(),
                                     downgrade_from: None,
                                     downgrade_reason: None,
+                                    quota_warnings: None,
                                 })))
                                 .await;
                         }
@@ -1767,15 +2049,23 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                 } else {
                     let _ = tx
                         .send(StreamEvent::Done(Box::new(DoneData {
-                            message_id: msg_id_str.clone(),
                             usage: Some(usage),
                             effective_model: model.clone(),
                             selected_model: model.clone(),
                             quota_decision: "allow".into(),
                             downgrade_from: None,
                             downgrade_reason: None,
+                            quota_warnings: None,
                         })))
                         .await;
+                }
+
+                // Metrics: incomplete stream
+                if let Some(ref fctx) = fin_ctx {
+                    let ms = stream_start.elapsed().as_secs_f64() * 1000.0;
+                    fctx.metrics.record_stream_incomplete(&fctx.provider_id, &fctx.effective_model, &reason);
+                    fctx.metrics.record_stream_completed(&fctx.provider_id, &fctx.effective_model);
+                    fctx.metrics.record_stream_total_latency_ms(&fctx.provider_id, &fctx.effective_model, ms);
                 }
 
                 StreamOutcome {
@@ -1810,6 +2100,8 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                         None,
                         None,
                         web_search_completed_count,
+                        first_token_time.map(|d| d.as_millis() as u64),
+                        Some(elapsed.as_millis() as u64),
                     );
                     match fctx.finalization_svc.finalize_turn_cas(input).await {
                         Ok(outcome) if outcome.won_cas => {
@@ -1838,6 +2130,13 @@ fn spawn_provider_task<TR: TurnRepository + 'static, MR: MessageRepository + 'st
                             message,
                         }))
                         .await;
+                }
+
+                // Metrics: failed stream (post-provider)
+                if let Some(ref fctx) = fin_ctx {
+                    let ms = stream_start.elapsed().as_secs_f64() * 1000.0;
+                    fctx.metrics.record_stream_failed(&fctx.provider_id, &fctx.effective_model, &code);
+                    fctx.metrics.record_stream_total_latency_ms(&fctx.provider_id, &fctx.effective_model, ms);
                 }
 
                 StreamOutcome {
@@ -1875,6 +2174,23 @@ mod tests {
     // ── Noop OutboxEnqueuer ──
 
     #[allow(de0309_must_have_domain_model)]
+    struct NoopQuotaWarningsProvider;
+    #[async_trait::async_trait]
+    impl crate::domain::service::quota_settler::QuotaWarningsProvider for NoopQuotaWarningsProvider {
+        async fn get_quota_warnings(
+            &self,
+            _scope: &modkit_security::AccessScope,
+            _tenant_id: Uuid,
+            _user_id: Uuid,
+        ) -> Result<
+            Vec<crate::domain::stream_events::QuotaWarning>,
+            crate::domain::error::DomainError,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    #[allow(de0309_must_have_domain_model)]
     struct NoopOutboxEnqueuer;
     #[async_trait::async_trait]
     impl crate::domain::repos::OutboxEnqueuer for NoopOutboxEnqueuer {
@@ -1890,6 +2206,14 @@ mod tests {
             &self,
             _runner: &(dyn modkit_db::secure::DBRunner + Sync),
             _event: crate::domain::repos::AttachmentCleanupEvent,
+        ) -> Result<(), crate::domain::error::DomainError> {
+            Ok(())
+        }
+
+        async fn enqueue_audit_event(
+            &self,
+            _runner: &(dyn modkit_db::secure::DBRunner + Sync),
+            _event: crate::domain::model::audit_envelope::AuditEnvelope,
         ) -> Result<(), crate::domain::error::DomainError> {
             Ok(())
         }
@@ -2172,6 +2496,7 @@ mod tests {
             "test-model".into(),
             "test-model".into(),
             4096,
+            2, // max_tool_calls
             2, // web_search_max_calls
             cancel,
             tx,
@@ -2222,6 +2547,7 @@ mod tests {
             "test-model".into(),
             "test-model".into(),
             4096,
+            2, // max_tool_calls
             2, // web_search_max_calls
             cancel,
             tx,
@@ -2265,6 +2591,7 @@ mod tests {
             "test-model".into(),
             "test-model".into(),
             4096,
+            2, // max_tool_calls
             2, // web_search_max_calls
             cancel,
             tx,
@@ -2357,6 +2684,7 @@ mod tests {
             "test-model".into(),
             "test-model".into(),
             4096,
+            2, // max_tool_calls
             2, // web_search_max_calls
             cancel.clone(),
             tx,
@@ -2390,6 +2718,29 @@ mod tests {
     fn build_stream_service(
         db: Arc<DbProvider>,
         provider: Arc<dyn LlmProvider>,
+    ) -> StreamService<
+        TurnRepo,
+        MsgRepo,
+        OrmQuotaUsageRepo,
+        OrmChatRepo,
+        MockThreadSummaryRepo,
+        OrmAttachmentRepo,
+        OrmVectorStoreRepo,
+        OrmMessageAttachmentRepo,
+    > {
+        build_stream_service_with_metrics(
+            db,
+            provider,
+            Arc::new(crate::domain::ports::metrics::NoopMetrics),
+        )
+    }
+
+    /// Build a `StreamService` with real DB repos, a mock LLM provider,
+    /// and an injectable metrics implementation.
+    fn build_stream_service_with_metrics(
+        db: Arc<DbProvider>,
+        provider: Arc<dyn LlmProvider>,
+        metrics: Arc<dyn crate::domain::ports::MiniChatMetricsPort>,
     ) -> StreamService<
         TurnRepo,
         MsgRepo,
@@ -2438,6 +2789,7 @@ mod tests {
             Arc::clone(&message_repo),
             Arc::new(MockQuotaSettler) as Arc<dyn QuotaSettler>,
             Arc::new(NoopOutboxEnqueuer) as Arc<dyn crate::domain::repos::OutboxEnqueuer>,
+            Arc::clone(&metrics),
         ));
 
         // QuotaService with permissive defaults — model catalog includes
@@ -2506,6 +2858,7 @@ mod tests {
             Arc::new(crate::infra::db::repo::vector_store_repo::VectorStoreRepository),
             Arc::new(crate::infra::db::repo::message_attachment_repo::MessageAttachmentRepository),
             crate::config::ContextConfig::default(),
+            metrics,
         )
     }
 
@@ -2545,6 +2898,7 @@ mod tests {
             description: None,
             multimodal_capabilities: vec![],
             context_window: 128_000,
+            max_file_size_mb: 25,
             system_prompt: String::new(),
         }
     }
@@ -3118,7 +3472,9 @@ mod tests {
             .await
             .expect("should start stream");
 
-        // Read the first delta
+        // Read the stream_started event, then the first delta
+        let started = rx.recv().await.expect("should get stream_started");
+        assert!(matches!(started, StreamEvent::StreamStarted(_)));
         let first = rx.recv().await.expect("should get delta");
         assert!(matches!(first, StreamEvent::Delta(_)));
 
@@ -3146,6 +3502,11 @@ mod tests {
         assert!(
             turn.completed_at.is_some(),
             "completed_at should be set after CAS finalization"
+        );
+        // D4: cancelled turn with accumulated text should have assistant_message_id
+        assert!(
+            turn.assistant_message_id.is_some(),
+            "cancelled turn with partial text should have assistant_message_id"
         );
     }
 
@@ -3270,6 +3631,7 @@ mod tests {
             Arc::clone(&message_repo_arc),
             Arc::new(NoopSettler) as Arc<dyn QuotaSettler>,
             Arc::new(NoopOutboxEnqueuer) as Arc<dyn crate::domain::repos::OutboxEnqueuer>,
+            Arc::new(crate::domain::ports::metrics::NoopMetrics),
         ));
 
         let fctx = FinalizationCtx {
@@ -3280,6 +3642,7 @@ mod tests {
             chat_id,
             request_id,
             user_id,
+            requester_type: RequesterType::User,
             message_id,
             effective_model: "gpt-4o-mini".to_owned(),
             selected_model: "gpt-4o".to_owned(),
@@ -3292,6 +3655,9 @@ mod tests {
             downgrade_from: Some("gpt-4o".to_owned()),
             downgrade_reason: Some("premium_exhausted".to_owned()),
             period_starts: Vec::new(),
+            provider_id: "openai".to_owned(),
+            metrics: Arc::new(crate::domain::ports::metrics::NoopMetrics),
+            quota_warnings_provider: Arc::new(NoopQuotaWarningsProvider),
         };
 
         let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["Hello"]));
@@ -3308,6 +3674,7 @@ mod tests {
             "gpt-4o-mini".into(), // effective_model passed as the model param
             "gpt-4o-mini".into(),
             4096,
+            2, // max_tool_calls
             2, // web_search_max_calls
             cancel,
             tx,
@@ -3426,6 +3793,7 @@ mod tests {
             Arc::clone(&message_repo),
             Arc::new(MockQuotaSettler) as Arc<dyn QuotaSettler>,
             Arc::new(NoopOutboxEnqueuer) as Arc<dyn crate::domain::repos::OutboxEnqueuer>,
+            Arc::new(crate::domain::ports::metrics::NoopMetrics),
         ));
 
         let quota_svc = Arc::new(crate::domain::service::QuotaService::new(
@@ -3465,6 +3833,7 @@ mod tests {
             Arc::new(crate::infra::db::repo::vector_store_repo::VectorStoreRepository),
             Arc::new(crate::infra::db::repo::message_attachment_repo::MessageAttachmentRepository),
             crate::config::ContextConfig::default(),
+            Arc::new(crate::domain::ports::metrics::NoopMetrics),
         )
     }
 
@@ -3546,7 +3915,7 @@ mod tests {
         assert!(done.downgrade_from.is_none());
 
         // Verify turn was created with real quota fields (not placeholder 1_000_000)
-        let scope = AccessScope::allow_all().tenant_only();
+        let scope = AccessScope::allow_all();
         let conn = db.conn().unwrap();
         let turn_repo = TurnRepo;
         let turn = turn_repo
@@ -3676,6 +4045,7 @@ mod tests {
                     description: None,
                     multimodal_capabilities: vec![],
                     context_window: 128_000,
+                    max_file_size_mb: 25,
                     system_prompt: String::new(),
                 },
                 false,
@@ -3777,6 +4147,7 @@ mod tests {
             "test-model".into(),
             "test-model".into(),
             4096,
+            2, // max_tool_calls
             2, // web_search_max_calls
             cancel,
             tx,
@@ -3821,6 +4192,7 @@ mod tests {
             "test-model".into(),
             "test-model".into(),
             4096,
+            2, // max_tool_calls
             2, // web_search_max_calls
             cancel,
             tx,
@@ -3875,6 +4247,7 @@ mod tests {
             "test-model".into(),
             "test-model".into(),
             4096,
+            2, // max_tool_calls
             2, // web_search_max_calls
             cancel,
             tx,
@@ -4553,6 +4926,7 @@ mod tests {
             Arc::clone(&message_repo),
             Arc::new(MockQuotaSettler) as Arc<dyn QuotaSettler>,
             Arc::new(NoopOutboxEnqueuer) as Arc<dyn crate::domain::repos::OutboxEnqueuer>,
+            Arc::new(crate::domain::ports::metrics::NoopMetrics),
         ));
 
         let quota_svc = Arc::new(crate::domain::service::QuotaService::new(
@@ -4608,6 +4982,7 @@ mod tests {
             Arc::new(crate::infra::db::repo::vector_store_repo::VectorStoreRepository),
             Arc::new(crate::infra::db::repo::message_attachment_repo::MessageAttachmentRepository),
             crate::config::ContextConfig::default(),
+            Arc::new(crate::domain::ports::metrics::NoopMetrics),
         )
     }
 
@@ -4789,5 +5164,396 @@ mod tests {
             got_done,
             "mutation stream should complete despite kill switch"
         );
+    }
+
+    // ── TestMetrics — recording implementation for metric assertions ─────
+
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    /// Lightweight `MiniChatMetricsPort` that records counter increments
+    /// and histogram observation counts via atomics. Used to verify that
+    /// service code emits the expected metrics.
+    #[domain_model]
+    struct TestMetrics {
+        stream_started: AtomicU64,
+        stream_completed: AtomicU64,
+        stream_failed: AtomicU64,
+        stream_disconnected: AtomicU64,
+        stream_incomplete: AtomicU64,
+        active_streams_inc: AtomicU64,
+        active_streams_dec: AtomicU64,
+        ttft_provider_ms: AtomicU64,
+        ttft_overhead_ms: AtomicU64,
+        stream_total_latency_ms: AtomicU64,
+        quota_preflight: AtomicU64,
+        quota_reserve: AtomicU64,
+        quota_estimated_tokens: AtomicU64,
+        audit_emit: AtomicU64,
+        finalization_latency_ms: AtomicU64,
+        quota_commit: AtomicU64,
+        cancel_requested: AtomicU64,
+        cancel_effective: AtomicU64,
+        time_to_abort_ms: AtomicU64,
+    }
+
+    impl TestMetrics {
+        fn new() -> Self {
+            Self {
+                stream_started: AtomicU64::new(0),
+                stream_completed: AtomicU64::new(0),
+                stream_failed: AtomicU64::new(0),
+                stream_disconnected: AtomicU64::new(0),
+                stream_incomplete: AtomicU64::new(0),
+                active_streams_inc: AtomicU64::new(0),
+                active_streams_dec: AtomicU64::new(0),
+                ttft_provider_ms: AtomicU64::new(0),
+                ttft_overhead_ms: AtomicU64::new(0),
+                stream_total_latency_ms: AtomicU64::new(0),
+                quota_preflight: AtomicU64::new(0),
+                quota_reserve: AtomicU64::new(0),
+                quota_estimated_tokens: AtomicU64::new(0),
+                audit_emit: AtomicU64::new(0),
+                finalization_latency_ms: AtomicU64::new(0),
+                quota_commit: AtomicU64::new(0),
+                cancel_requested: AtomicU64::new(0),
+                cancel_effective: AtomicU64::new(0),
+                time_to_abort_ms: AtomicU64::new(0),
+            }
+        }
+    }
+
+    impl crate::domain::ports::MiniChatMetricsPort for TestMetrics {
+        fn record_stream_started(&self, _: &str, _: &str) {
+            self.stream_started.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_stream_completed(&self, _: &str, _: &str) {
+            self.stream_completed.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_stream_failed(&self, _: &str, _: &str, _: &str) {
+            self.stream_failed.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_stream_disconnected(&self, _: &str) {
+            self.stream_disconnected.fetch_add(1, Ordering::Relaxed);
+        }
+        fn increment_active_streams(&self) {
+            self.active_streams_inc.fetch_add(1, Ordering::Relaxed);
+        }
+        fn decrement_active_streams(&self) {
+            self.active_streams_dec.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_ttft_provider_ms(&self, _: &str, _: &str, _: f64) {
+            self.ttft_provider_ms.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_ttft_overhead_ms(&self, _: &str, _: &str, _: f64) {
+            self.ttft_overhead_ms.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_stream_total_latency_ms(&self, _: &str, _: &str, _: f64) {
+            self.stream_total_latency_ms.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_turn_mutation(&self, _: &str, _: &str) {}
+        fn record_turn_mutation_latency_ms(&self, _: &str, _: f64) {}
+        fn record_audit_emit(&self, _: &str) {
+            self.audit_emit.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_finalization_latency_ms(&self, _: f64) {
+            self.finalization_latency_ms.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_quota_preflight(&self, _: &str, _: &str, _: &str) {
+            self.quota_preflight.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_quota_reserve(&self, _: &str) {
+            self.quota_reserve.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_quota_commit(&self, _: &str) {
+            self.quota_commit.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_quota_overshoot(&self, _: &str) {}
+        fn record_quota_estimated_tokens(&self, _: f64) {
+            self.quota_estimated_tokens.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_quota_actual_tokens(&self, _: f64) {}
+        fn record_stream_incomplete(&self, _: &str, _: &str, _: &str) {
+            self.stream_incomplete.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_cancel_requested(&self, _: &str) {
+            self.cancel_requested.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_cancel_effective(&self, _: &str) {
+            self.cancel_effective.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_time_to_abort_ms(&self, _: &str, _: f64) {
+            self.time_to_abort_ms.fetch_add(1, Ordering::Relaxed);
+        }
+        fn record_streams_aborted(&self, _: &str) {}
+        fn record_attachment_upload(&self, _: &str, _: &str) {}
+        fn record_attachment_upload_bytes(&self, _: &str, _: f64) {}
+        fn increment_attachments_pending(&self) {}
+        fn decrement_attachments_pending(&self) {}
+    }
+
+    // ── Metric emission tests ────────────────────────────────────────────
+
+    /// Provider that emits one delta then hangs indefinitely, allowing
+    /// cancellation tests. The stream yields a single token, then `pending`
+    /// forever until the cancellation token fires.
+    #[domain_model]
+    struct HangingProvider;
+
+    #[async_trait::async_trait]
+    impl LlmProvider for HangingProvider {
+        async fn stream(
+            &self,
+            _ctx: SecurityContext,
+            _request: LlmRequest<Streaming>,
+            _upstream_alias: &str,
+            cancel: CancellationToken,
+        ) -> Result<ProviderStream, LlmProviderError> {
+            let one_delta = stream::once(async {
+                Ok(TranslatedEvent::Sse(ClientSseEvent::Delta {
+                    r#type: "text",
+                    content: "Hi".to_owned(),
+                }))
+            });
+            // Chain with a stream that never resolves
+            let hanging = one_delta.chain(stream::pending());
+            Ok(ProviderStream::new(hanging, cancel))
+        }
+
+        async fn complete(
+            &self,
+            _ctx: SecurityContext,
+            _request: LlmRequest<NonStreaming>,
+            _upstream_alias: &str,
+        ) -> Result<ResponseResult, LlmProviderError> {
+            unimplemented!()
+        }
+    }
+
+    /// Happy path: completed stream emits expected metric sequence.
+    #[tokio::test]
+    async fn metrics_emitted_on_completed_stream() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let metrics = Arc::new(TestMetrics::new());
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::completed(&["Hello"]));
+        let svc = build_stream_service_with_metrics(db, provider, Arc::clone(&metrics) as _);
+
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let (tx, mut rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let handle = svc
+            .run_stream(
+                ctx,
+                chat_id,
+                Uuid::new_v4(),
+                "hello".into(),
+                test_resolved_model(),
+                false,
+                Vec::new(),
+                cancel,
+                tx,
+            )
+            .await
+            .expect("should succeed");
+
+        // Drain events
+        while let Some(ev) = rx.recv().await {
+            if ev.is_terminal() {
+                break;
+            }
+        }
+        let outcome = handle.await.expect("task should complete");
+        assert_eq!(outcome.terminal, StreamTerminal::Completed);
+
+        // Verify metric emissions
+        assert_eq!(metrics.stream_started.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.stream_completed.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.stream_failed.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.active_streams_inc.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.active_streams_dec.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.ttft_provider_ms.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.ttft_overhead_ms.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.stream_total_latency_ms.load(Ordering::Relaxed), 1);
+        // Preflight: 1 call (allow)
+        assert_eq!(metrics.quota_preflight.load(Ordering::Relaxed), 1);
+        // Reserve: 2 calls (daily + monthly)
+        assert_eq!(metrics.quota_reserve.load(Ordering::Relaxed), 2);
+        assert_eq!(metrics.quota_estimated_tokens.load(Ordering::Relaxed), 1);
+        // Finalization: audit emit + latency
+        assert_eq!(metrics.audit_emit.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.finalization_latency_ms.load(Ordering::Relaxed), 1);
+    }
+
+    /// Failure path: provider error emits `stream_failed`, not `stream_completed`.
+    #[tokio::test]
+    async fn metrics_emitted_on_provider_error() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let metrics = Arc::new(TestMetrics::new());
+        let provider: Arc<dyn LlmProvider> = Arc::new(MockProvider::failing());
+        let svc = build_stream_service_with_metrics(db, provider, Arc::clone(&metrics) as _);
+
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let (tx, mut rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let handle = svc
+            .run_stream(
+                ctx,
+                chat_id,
+                Uuid::new_v4(),
+                "hello".into(),
+                test_resolved_model(),
+                false,
+                Vec::new(),
+                cancel,
+                tx,
+            )
+            .await
+            .expect("should succeed (stream spawned)");
+
+        // Drain events — expect an error event
+        while let Some(ev) = rx.recv().await {
+            if ev.is_terminal() {
+                break;
+            }
+        }
+        let outcome = handle.await.expect("task should complete");
+        assert_eq!(outcome.terminal, StreamTerminal::Failed);
+
+        // Verify metric emissions
+        assert_eq!(metrics.stream_started.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.stream_completed.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.stream_failed.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.active_streams_inc.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.active_streams_dec.load(Ordering::Relaxed), 1);
+        // No first token → no TTFT metrics
+        assert_eq!(metrics.ttft_provider_ms.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.ttft_overhead_ms.load(Ordering::Relaxed), 0);
+        // Total latency is still recorded
+        assert_eq!(metrics.stream_total_latency_ms.load(Ordering::Relaxed), 1);
+        // Preflight still ran
+        assert_eq!(metrics.quota_preflight.load(Ordering::Relaxed), 1);
+    }
+
+    /// Incomplete path: `stream_incomplete` + `stream_completed` both emitted.
+    #[tokio::test]
+    async fn metrics_emitted_on_incomplete_stream() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let metrics = Arc::new(TestMetrics::new());
+        let provider: Arc<dyn LlmProvider> =
+            Arc::new(MockProvider::incomplete(&["Partial output"]));
+        let svc = build_stream_service_with_metrics(db, provider, Arc::clone(&metrics) as _);
+
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let (tx, mut rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let handle = svc
+            .run_stream(
+                ctx,
+                chat_id,
+                Uuid::new_v4(),
+                "hello".into(),
+                test_resolved_model(),
+                false,
+                Vec::new(),
+                cancel,
+                tx,
+            )
+            .await
+            .expect("should succeed");
+
+        while let Some(ev) = rx.recv().await {
+            if ev.is_terminal() {
+                break;
+            }
+        }
+        let outcome = handle.await.expect("task should complete");
+        assert_eq!(outcome.terminal, StreamTerminal::Incomplete);
+
+        // stream_incomplete is a sub-counter of stream_completed (both emitted)
+        assert_eq!(metrics.stream_incomplete.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.stream_completed.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.stream_failed.load(Ordering::Relaxed), 0);
+        // Active streams gauge balanced
+        assert_eq!(metrics.active_streams_inc.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.active_streams_dec.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.stream_total_latency_ms.load(Ordering::Relaxed), 1);
+    }
+
+    /// Cancel path: cancellation metrics emitted, `active_streams` gauge balanced.
+    #[tokio::test]
+    async fn metrics_emitted_on_cancelled_stream() {
+        let db = mock_db_provider(inmem_db().await);
+        let tenant_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let chat_id = Uuid::new_v4();
+        insert_test_chat(&db, tenant_id, user_id, chat_id).await;
+
+        let metrics = Arc::new(TestMetrics::new());
+        let provider: Arc<dyn LlmProvider> = Arc::new(HangingProvider);
+        let svc = build_stream_service_with_metrics(db, provider, Arc::clone(&metrics) as _);
+
+        let ctx = test_security_ctx_with_id(tenant_id, user_id);
+        let (tx, mut rx) = mpsc::channel(32);
+        let cancel = CancellationToken::new();
+
+        let handle = svc
+            .run_stream(
+                ctx,
+                chat_id,
+                Uuid::new_v4(),
+                "hello".into(),
+                test_resolved_model(),
+                false,
+                Vec::new(),
+                cancel.clone(),
+                tx,
+            )
+            .await
+            .expect("should succeed");
+
+        // Wait for stream_started and first delta to arrive, then cancel
+        let started = rx.recv().await.expect("should get stream_started");
+        assert!(matches!(started, StreamEvent::StreamStarted(_)));
+        let ev = rx.recv().await.expect("should receive delta");
+        assert!(
+            matches!(ev, StreamEvent::Delta(_)),
+            "second event should be a delta"
+        );
+        cancel.cancel();
+
+        // Drain remaining events
+        while rx.recv().await.is_some() {}
+        let outcome = handle.await.expect("task should complete");
+        assert_eq!(outcome.terminal, StreamTerminal::Cancelled);
+
+        // Cancellation metrics
+        assert_eq!(metrics.cancel_requested.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.stream_disconnected.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.cancel_effective.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.time_to_abort_ms.load(Ordering::Relaxed), 1);
+        // NOT completed or failed
+        assert_eq!(metrics.stream_completed.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.stream_failed.load(Ordering::Relaxed), 0);
+        // Active streams gauge balanced
+        assert_eq!(metrics.active_streams_inc.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.active_streams_dec.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics.stream_total_latency_ms.load(Ordering::Relaxed), 1);
     }
 }

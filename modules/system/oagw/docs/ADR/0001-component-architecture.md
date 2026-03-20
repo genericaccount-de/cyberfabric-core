@@ -6,6 +6,29 @@ decision-makers: OAGW Team
 
 # Component Architecture — Single Module with Trait-Based Service Isolation
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Internal Services](#internal-services)
+  - [Module Structure](#module-structure)
+  - [Internal Communication](#internal-communication)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Multi-crate architecture](#multi-crate-architecture)
+  - [Single module with internal trait-based service isolation](#single-module-with-internal-trait-based-service-isolation)
+  - [Monolithic single-service design](#monolithic-single-service-design)
+- [More Information](#more-information)
+- [Related ADRs](#related-adrs)
+- [References](#references)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-component-architecture`
 
 **Superseded By**: Single-module implementation with internal trait-based service isolation (2026-02-17). The original multi-crate design was simplified during implementation to a single `oagw` crate with DDD-Light layering (`domain/infra/api`). The CP/DP separation is preserved as internal domain traits, not separate crates.

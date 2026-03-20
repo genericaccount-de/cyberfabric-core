@@ -28,6 +28,16 @@ pub struct ValidatedMime {
     pub kind: AttachmentKind,
 }
 
+/// Strip charset and other parameters: `text/plain; charset=utf-8` → `text/plain`.
+pub(crate) fn normalize_mime(content_type: &str) -> String {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase()
+}
+
 /// MIME allowlist: 20 types (19 from spec + image/gif per spec:64).
 ///
 /// Strips charset parameters (e.g., `text/plain; charset=utf-8` → `text/plain`).
@@ -35,13 +45,7 @@ pub struct ValidatedMime {
 ///
 /// Returns the canonical MIME string and the attachment kind (Document or Image).
 pub fn validate_mime(content_type: &str) -> Result<ValidatedMime, DomainError> {
-    // Strip charset and other parameters: take only the media type before `;`
-    let mime = content_type
-        .split(';')
-        .next()
-        .unwrap_or(content_type)
-        .trim()
-        .to_ascii_lowercase();
+    let mime = normalize_mime(content_type);
 
     match mime.as_str() {
         // Document types (16)
@@ -131,6 +135,50 @@ pub fn validate_mime(content_type: &str) -> Result<ValidatedMime, DomainError> {
             kind: AttachmentKind::Image,
         }),
         _ => Err(DomainError::UnsupportedFileType { mime: mime.clone() }),
+    }
+}
+
+/// Infer MIME type from filename extension when the client sends an unhelpful
+/// Content-Type (e.g. `application/octet-stream`). Returns `None` if the
+/// extension is unknown — the caller should keep the original Content-Type.
+#[must_use]
+pub fn infer_mime_from_extension(filename: &str) -> Option<&'static str> {
+    let (_, ext_raw) = filename.rsplit_once('.')?;
+    let ext = ext_raw.to_ascii_lowercase();
+    match ext.as_str() {
+        "pdf" => Some("application/pdf"),
+        "txt" => Some("text/plain"),
+        "md" | "markdown" => Some("text/markdown"),
+        "html" | "htm" => Some("text/html"),
+        "json" => Some("application/json"),
+        "docx" => Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        "pptx" => Some("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+        "py" => Some("text/x-python"),
+        "java" => Some("text/x-java"),
+        "js" | "mjs" => Some("text/javascript"),
+        "ts" | "mts" => Some("text/typescript"),
+        "rs" => Some("text/x-rust"),
+        "go" => Some("text/x-go"),
+        "cs" => Some("text/x-csharp"),
+        "rb" => Some("text/x-ruby"),
+        "sql" => Some("text/x-sql"),
+        "csv" => Some("text/csv"),
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+/// Remap `text/csv` to `text/plain` so it passes [`validate_mime`] and is indexed
+/// as plain text by the provider. Returns `None` for non-CSV content types.
+#[must_use]
+pub fn remap_csv_to_plain(content_type: &str) -> Option<&'static str> {
+    if normalize_mime(content_type) == "text/csv" {
+        Some("text/plain")
+    } else {
+        None
     }
 }
 
@@ -282,6 +330,7 @@ mod tests {
         assert!(validate_mime("video/mp4").is_err());
         assert!(validate_mime("audio/mpeg").is_err());
         assert!(validate_mime("application/zip").is_err());
+        // CSV is only accepted via remap_csv_to_plain; validate_mime alone rejects it.
         assert!(validate_mime("text/csv").is_err());
     }
 
@@ -307,6 +356,82 @@ mod tests {
                 .is_some_and(|ext| ext.eq_ignore_ascii_case("pdf"))
         );
         assert!(name.contains('_'));
+    }
+
+    #[test]
+    fn infer_md_from_extension() {
+        assert_eq!(
+            infer_mime_from_extension("readme.md"),
+            Some("text/markdown")
+        );
+        assert_eq!(infer_mime_from_extension("NOTES.MD"), Some("text/markdown"));
+        assert_eq!(
+            infer_mime_from_extension("doc.markdown"),
+            Some("text/markdown")
+        );
+    }
+
+    #[test]
+    fn infer_csv_from_extension() {
+        assert_eq!(infer_mime_from_extension("data.csv"), Some("text/csv"));
+    }
+
+    #[test]
+    fn infer_common_extensions() {
+        assert_eq!(
+            infer_mime_from_extension("file.pdf"),
+            Some("application/pdf")
+        );
+        assert_eq!(infer_mime_from_extension("code.rs"), Some("text/x-rust"));
+        assert_eq!(infer_mime_from_extension("photo.jpg"), Some("image/jpeg"));
+        assert_eq!(infer_mime_from_extension("photo.jpeg"), Some("image/jpeg"));
+        assert_eq!(infer_mime_from_extension("app.ts"), Some("text/typescript"));
+        assert_eq!(
+            infer_mime_from_extension("app.mts"),
+            Some("text/typescript")
+        );
+    }
+
+    #[test]
+    fn infer_unknown_extension_returns_none() {
+        assert_eq!(infer_mime_from_extension("archive.zip"), None);
+        assert_eq!(infer_mime_from_extension("video.mp4"), None);
+        assert_eq!(infer_mime_from_extension("noext"), None);
+        // Dotless filename that coincides with a known extension must not match.
+        assert_eq!(infer_mime_from_extension("md"), None);
+        assert_eq!(infer_mime_from_extension("pdf"), None);
+    }
+
+    #[test]
+    fn infer_then_validate_md() {
+        let mime = infer_mime_from_extension("readme.md").unwrap();
+        let result = validate_mime(mime).unwrap();
+        assert_eq!(result.mime, "text/markdown");
+        assert!(matches!(result.kind, AttachmentKind::Document));
+    }
+
+    #[test]
+    fn csv_remapped_to_plain() {
+        assert_eq!(remap_csv_to_plain("text/csv"), Some("text/plain"));
+        assert_eq!(
+            remap_csv_to_plain("text/csv; charset=utf-8"),
+            Some("text/plain")
+        );
+        assert_eq!(remap_csv_to_plain("TEXT/CSV"), Some("text/plain"));
+    }
+
+    #[test]
+    fn remap_csv_ignores_non_csv() {
+        assert_eq!(remap_csv_to_plain("text/plain"), None);
+        assert_eq!(remap_csv_to_plain("application/pdf"), None);
+    }
+
+    #[test]
+    fn csv_after_remap_passes_validation() {
+        let remapped = remap_csv_to_plain("text/csv").unwrap();
+        let result = validate_mime(remapped).unwrap();
+        assert_eq!(result.mime, "text/plain");
+        assert!(matches!(result.kind, AttachmentKind::Document));
     }
 
     #[test]

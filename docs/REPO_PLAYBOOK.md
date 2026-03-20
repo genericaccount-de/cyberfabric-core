@@ -170,7 +170,7 @@ Purpose: one concise map of repository artifacts that improve developer + AI pro
 
 ## 14) Agents, Prompts & AI Automation
 
-> Agents, prompts, and AI workflows are managed by **Cypilot** — see [.cypilot/](../.cypilot) (skills, scripts, templates, workflows) and [.cypilot-adapter/](../.cypilot-adapter) (project-specific configuration, `artifacts.json`, `AGENTS.md`).
+> Agents, prompts, and AI workflows are managed by **Cypilot** — see [.cypilot/](../.cypilot) (skills, scripts, templates, workflows) and [.cypilot/config/](../.cypilot/config) (project-specific configuration, `artifacts.toml`, `AGENTS.md`).
 
 | Item | Status / Phase / ID | Implemented (where) | Planned |
 |---|---|---|---|
@@ -178,10 +178,10 @@ Purpose: one concise map of repository artifacts that improve developer + AI pro
 | Automation rules | [x] `p2`| [Makefile](../Makefile), [scripts/ci.py](../scripts/ci.py), workflow files | Add automation safety policy |
 | Task automation guidelines | [x] `p2` | [scripts/ci.py](../scripts/ci.py), [Makefile](../Makefile) | Add “when to automate/not automate” guide |
 | Bot behavior rules | [x] `p2` | [docs/pr-review/README.md](./pr-review/README.md), workflow configs | Add standardized bot comment protocol |
-| Agents overview | [x] `p2` | [.cypilot/](../.cypilot), [.cypilot-adapter/](../.cypilot-adapter), [docs/pr-review/README.md](./pr-review/README.md) | Add central "AI operations" document |
+| Agents overview | [x] `p2` | [.cypilot/](../.cypilot), [.cypilot/config/](../.cypilot/config), [docs/pr-review/README.md](./pr-review/README.md) | Add central "AI operations" document |
 | Prompt guidelines | [x] `p2` | [.cypilot/](../.cypilot), [docs/checklists/README.md](./checklists/README.md) | Add universal prompt design guide |
 | Prompt templates | [x] `p2` | [.cypilot/](../.cypilot), `docs/pr-review/` templates | Add non-PR prompt template library |
-| Agent responsibilities | [x] `p2` | [.cypilot-adapter/AGENTS.md](../.cypilot-adapter/AGENTS.md), [docs/checklists/README.md](./checklists/README.md) | Add explicit role split per bot/agent |
+| Agent responsibilities | [x] `p2` | [.cypilot/config/AGENTS.md](../.cypilot/config/AGENTS.md), [docs/checklists/README.md](./checklists/README.md) | Add explicit role split per bot/agent |
 | Agent boundaries | [ ] `p3` | Implicit in review workflows | Add hard boundaries + escalation policy |
 | Agent input/output contracts | [ ] `p3` | Templates exist for PR/status outputs | Add formal contract schema |
 | Agent lifecycle | [ ] `p3` | Not formalized | Add lifecycle/run-states doc |

@@ -36,6 +36,10 @@
     {
       "name": "models",
       "description": "Read-only model catalog visible to the authenticated user."
+    },
+    {
+      "name": "quota",
+      "description": "Per-user quota status queries."
     }
   ],
   "paths": {
@@ -93,6 +97,16 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "description": "Internal server error while creating the chat.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -100,13 +114,16 @@
         "operationId": "listChats",
         "tags": ["chats"],
         "summary": "List chats for the current user",
-        "description": "Returns chats for the authenticated user ordered by most recent activity (`updated_at` DESC, `id` DESC tiebreaker). Supports cursor-based pagination via `limit` and `cursor` parameters.",
+        "description": "Returns chats for the authenticated user ordered by most recent activity (`updated_at` DESC, `id` DESC tiebreaker). Supports cursor-based pagination via `limit` and `cursor` parameters.\n\n**OData support**:\n- `$filter`: `title` — string functions `contains(title, '...')`, `startswith(title, '...')`, `endswith(title, '...')`; comparison operators `eq`, `ne`. Also supports `updated_at` (eq, ne, gt, ge, lt, le) and `id` (eq, ne).",
         "parameters": [
           {
             "$ref": "#/components/parameters/PaginationLimit"
           },
           {
             "$ref": "#/components/parameters/PaginationCursor"
+          },
+          {
+            "$ref": "#/components/parameters/ODataFilter"
           }
         ],
         "responses": {
@@ -120,11 +137,31 @@
               }
             }
           },
+          "400": {
+            "description": "Bad request, for example an invalid pagination or OData query.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "description": "Internal server error while listing chats.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -160,6 +197,16 @@
               }
             }
           },
+          "400": {
+            "description": "Invalid request, for example an invalid `id` path parameter format.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
@@ -168,6 +215,16 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "Internal server error while fetching the chat.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -188,6 +245,16 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "Internal server error while deleting the chat.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -247,6 +314,16 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "Internal server error while updating the chat title.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -261,7 +338,7 @@
         "operationId": "sendMessage",
         "tags": ["messages"],
         "summary": "Send message and receive streamed AI response",
-        "description": "Sends a user message and opens an SSE stream for the assistant response. If `request_id` matches an active generation, returns 409 Conflict (JSON, no SSE). If `request_id` matches a completed generation, replays the response as SSE (side-effect-free: no new quota reserve, no billing events).\n\nThe optional `web_search` parameter enables web search for this turn (disabled by default, backward compatible).\n\n**Attachment fields**: `attachment_ids` identifies attachments explicitly attached to this message (persisted into `message_attachments`, returned in message `attachments[]`; images included in multimodal input for the current turn). In P1, retrieval always covers all documents in the chat vector store — `attachment_ids` does not scope or filter retrieval. `file_search` is only included when the chat has at least one ready document attachment.\n\n**SSE event ordering (P1)**: `ping* (delta | tool)* citations? (done | error)`. `delta` and `tool` may interleave; at most one `citations` event, emitted after all `delta` events and before the terminal event.\n\nExactly one terminal event (`done` or `error`) ends the stream.\n\n**SSE event types and payloads**:\n- `event: ping` — keepalive, payload: `{}`. Clients MUST ignore.\n- `event: delta` — incremental text. Payload: `SseDeltaEvent`.\n- `event: tool` — tool activity (file_search, web_search at P1). Payload: `SseToolEvent`.\n- `event: citations` — source references (file and web). Payload: `SseCitationsEvent`.\n- `event: done` — terminal success with usage and quota_decision. Emitted for both full completions and truncated-but-successful completions (provider `response.incomplete`). Payload: `SseDoneEvent`.\n- `event: error` — terminal failure. Payload: `SseErrorEvent`.\n\nSee component schemas for payload definitions.\n\n**Pre-stream errors**: If validation, authorization, or quota preflight fails before streaming, a JSON error response with the appropriate HTTP status is returned and no SSE stream is opened.\n\n**Cancellation**: If the client disconnects mid-stream, the server cancels the in-flight provider request and applies a bounded best-effort debit for quota. No SSE error event is emitted (the stream is already broken). The Turn Status API is authoritative for final state after disconnect.",
+        "description": "Sends a user message and opens an SSE stream for the assistant response. If `request_id` matches an active generation, returns 409 Conflict (JSON, no SSE). If `request_id` matches a completed generation, replays the response as SSE (side-effect-free: no new quota reserve, no billing events).\n\nThe optional `web_search` parameter enables web search for this turn (disabled by default, backward compatible).\n\n**Attachment fields**: `attachment_ids` identifies attachments explicitly attached to this message (persisted into `message_attachments`, returned in message `attachments[]`; images included in multimodal input for the current turn). In P1, retrieval always covers all documents in the chat vector store — `attachment_ids` does not scope or filter retrieval. `file_search` is only included when the chat has at least one ready document attachment.\n\n**SSE event ordering**: `stream_started ping* (delta | tool)* citations? (done | error)`. `delta` and `tool` may interleave; at most one `citations` event, emitted after all `delta` events and before the terminal event.\n\nExactly one terminal event (`done` or `error`) ends the stream.\n\n**SSE event types and payloads**:\n- `event: stream_started` — first event, carries `request_id`, assistant `message_id`, and `is_new_turn` flag. Payload: `SseStreamStartedEvent`.\n- `event: ping` — keepalive, payload: `{}`. Clients MUST ignore.\n- `event: delta` — incremental text. Payload: `SseDeltaEvent`.\n- `event: tool` — tool activity (file_search, web_search at P1). Payload: `SseToolEvent`.\n- `event: citations` — source references (file and web). Payload: `SseCitationsEvent`.\n- `event: done` — terminal success with usage and quota_decision. Emitted for both full completions and truncated-but-successful completions (provider `response.incomplete`). Payload: `SseDoneEvent`.\n- `event: error` — terminal failure. Payload: `SseErrorEvent`.\n\nSee component schemas for payload definitions.\n\n**Pre-stream errors**: If validation, authorization, or quota preflight fails before streaming, a JSON error response with the appropriate HTTP status is returned and no SSE stream is opened.\n\n**Cancellation**: If the client disconnects mid-stream, the server cancels the in-flight provider request and applies a bounded best-effort debit for quota. No SSE error event is emitted (the stream is already broken). The Turn Status API is authoritative for final state after disconnect.",
         "requestBody": {
           "required": true,
           "content": {
@@ -298,8 +375,9 @@
             "content": {
               "text/event-stream": {
                 "schema": {
-                  "description": "Server-Sent Events stream. Each line is `event: <type>\\ndata: <JSON>\\n\\n`. Event ordering (P1): `ping* (delta | tool)* citations? (done | error)`. Exactly one terminal event ends the stream.",
+                  "description": "Server-Sent Events stream. Each line is `event: <type>\\ndata: <JSON>\\n\\n`. Event ordering: `stream_started ping* (delta | tool)* citations? (done | error)`. Exactly one terminal event ends the stream.",
                   "oneOf": [
+                    { "$ref": "#/components/schemas/SseStreamStartedEvent" },
                     { "$ref": "#/components/schemas/SseDeltaEvent" },
                     { "$ref": "#/components/schemas/SseToolEvent" },
                     { "$ref": "#/components/schemas/SseCitationsEvent" },
@@ -325,7 +403,7 @@
             }
           },
           "400": {
-            "description": "Bad request. Possible codes: `too_many_images` (exceeds per-message image input limit), `web_search_disabled` (web search requested but kill switch is active).",
+            "description": "Bad request detected before the SSE stream opens. Possible causes include empty message content, invalid model resolution, invalid attachment references, or `web_search_disabled`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -353,6 +431,16 @@
               }
             }
           },
+          "422": {
+            "description": "Context budget exceeded before generation starts. Code: `context_budget_exceeded`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "413": {
             "description": "Image bytes exceeded per-turn limit. Code: `image_bytes_exceeded`.",
             "content": {
@@ -364,7 +452,7 @@
             }
           },
           "415": {
-            "description": "Effective model does not support multimodal input. Validation occurs after downgrade decision and before provider call. Code: `unsupported_media`. Defensive: under the P1 catalog invariant (all enabled models include VISION_INPUT) this response is not expected; it activates if a future catalog introduces a non-vision model or on catalog misconfiguration.",
+            "description": "Effective model does not support multimodal input. Code: `unsupported_media`. Defensive: under the P1 catalog invariant (all enabled models include VISION_INPUT) this response is not expected; it activates if a future catalog introduces a non-vision model or on catalog misconfiguration.",
             "content": {
               "application/json": {
                 "schema": {
@@ -374,14 +462,21 @@
             }
           },
           "429": {
-            "description": "Quota or rate limit exceeded. Code: `quota_exceeded` (with mandatory `quota_scope`: `tokens`, `web_search`, or `image_inputs`) for user quota exhaustion (always pre-stream), or `rate_limited` for upstream provider throttling after OAGW retry exhaustion. `rate_limited` may also appear as a terminal SSE `event: error` if the provider returns 429 mid-stream (HTTP status remains 200 in that case). Clients MUST use the `code` field to distinguish the two.",
+            "description": "Quota or rate limit exceeded. Runtime responses use the Problem format. In current handlers, `title` is typically `quota_exceeded` for user quota exhaustion (always pre-stream) or `rate_limited` for upstream provider throttling after OAGW retry exhaustion. `rate_limited` may also appear as a terminal SSE `event: error` if the provider returns 429 mid-stream (HTTP status remains 200 in that case). `quota_scope` is tracked internally but is not currently included in the response body.",
             "content": {
               "application/json": {
                 "schema": {
-                  "oneOf": [
-                    { "$ref": "#/components/schemas/QuotaExceededError" },
-                    { "$ref": "#/components/schemas/GenericError" }
-                  ]
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error before the SSE stream opens. Problem title is typically `internal_server_error`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -419,7 +514,7 @@
         "operationId": "uploadAttachment",
         "tags": ["attachments"],
         "summary": "Upload a document or image to a chat",
-        "description": "Uploads a file as an attachment. MIME type determines `kind`: `image/png`, `image/jpeg`, `image/webp` produce `image` attachments; all other supported types produce `document` attachments. Documents are indexed in the chat's dedicated vector store and optionally summarized. Images are stored via the provider Files API but NOT indexed in vector stores. Returns immediately with `status: pending`; transitions to `ready` or `failed` asynchronously.",
+        "description": "Uploads a file as an attachment. MIME type determines `kind`: `image/png`, `image/jpeg`, `image/webp` produce `image` attachments; all other supported types produce `document` attachments. Documents are indexed in the chat's dedicated vector store and optionally summarized. Images are stored via the provider Files API but NOT indexed in vector stores. Returns immediately with `status: pending`; transitions to `ready` or `failed` asynchronously.\n\n**MIME inference**: When the browser sends `application/octet-stream` (common for `.md` and other text files), the server infers the actual MIME type from the file extension. Supported extensions include `.pdf`, `.md`, `.txt`, `.html`, `.docx`, `.pptx`, `.json`, `.csv`, and others.\n\n**CSV support**: `text/csv` files are accepted and internally remapped to `text/plain` for indexing compatibility. This behavior is controlled by server configuration (`allow_csv_upload`, default: true).",
         "requestBody": {
           "required": true,
           "content": {
@@ -447,7 +542,7 @@
                   "$ref": "#/components/schemas/Attachment"
                 },
                 "example": {
-                  "attachment_id": "c3d4e5f6-7890-4abc-def1-234567890abc",
+                  "id": "c3d4e5f6-7890-4abc-def1-234567890abc",
                   "status": "pending",
                   "kind": "document",
                   "filename": "Q3_Report.pdf",
@@ -456,6 +551,16 @@
                   "doc_summary": null,
                   "img_thumbnail": null,
                   "created_at": "2025-06-15T10:35:00Z"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request, for example malformed multipart data, missing `file` field, missing file bytes, or other request validation failures.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -490,7 +595,17 @@
             }
           },
           "429": {
-            "description": "Daily upload quota exceeded. Code: `quota_exceeded`, `quota_scope`: `uploads`.",
+            "description": "Daily upload quota exceeded. Runtime responses use the Problem format; `title` is typically `quota_exceeded`. Upload quota scope is enforced internally and is not currently included in the response body.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error while uploading the attachment.",
             "content": {
               "application/json": {
                 "schema": {
@@ -522,16 +637,13 @@
         "operationId": "listMessages",
         "tags": ["messages"],
         "summary": "List messages with cursor pagination",
-        "description": "Returns paginated messages for a chat using cursor-based pagination with OData query support. Default ordering is `created_at asc` (chronological). Use `$orderby`, `$filter`, and `$select` for advanced queries.\n\n**OData support**:\n- `$orderby`: `created_at asc|desc`, `id asc|desc`\n- `$filter`: `created_at` (eq, ne, gt, ge, lt, le), `role` (eq, ne, in), `id` (eq, ne, in)\n- `$select`: any top-level field (including `attachments`)",
+        "description": "Returns paginated messages for a chat using cursor-based pagination with OData query support. Default ordering is `created_at asc` (chronological). Use `$orderby` and `$filter` for advanced queries.\n\n**OData support**:\n- `$orderby`: `created_at asc|desc`, `id asc|desc`\n- `$filter`: `created_at` (eq, ne, gt, ge, lt, le), `role` (eq, ne, in), `id` (eq, ne, in)",
         "parameters": [
           {
             "$ref": "#/components/parameters/PaginationLimit"
           },
           {
             "$ref": "#/components/parameters/PaginationCursor"
-          },
-          {
-            "$ref": "#/components/parameters/ODataSelect"
           },
           {
             "$ref": "#/components/parameters/ODataOrderBy"
@@ -604,6 +716,16 @@
               }
             }
           },
+          "400": {
+            "description": "Bad request, for example an invalid pagination or OData query.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "401": {
             "$ref": "#/components/responses/Unauthorized"
           },
@@ -612,6 +734,16 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "Internal server error while listing messages.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -642,7 +774,7 @@
                   "document_attachment": {
                     "summary": "Document attachment (ready, with summary)",
                     "value": {
-                      "attachment_id": "c3d4e5f6-7890-4abc-def1-234567890abc",
+                      "id": "c3d4e5f6-7890-4abc-def1-234567890abc",
                       "status": "ready",
                       "kind": "document",
                       "filename": "Q3_Report.pdf",
@@ -658,7 +790,7 @@
                   "image_attachment": {
                     "summary": "Image attachment (ready, with thumbnail preview)",
                     "value": {
-                      "attachment_id": "d4e5f6a7-8901-4abc-def1-234567890abd",
+                      "id": "d4e5f6a7-8901-4abc-def1-234567890abd",
                       "status": "ready",
                       "kind": "image",
                       "filename": "architecture_diagram.png",
@@ -688,6 +820,16 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "Internal server error while fetching the attachment.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -711,6 +853,16 @@
           },
           "409": {
             "description": "Attachment cannot be deleted because it is referenced by a submitted message. Code: `attachment_locked`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error while deleting the attachment.",
             "content": {
               "application/json": {
                 "schema": {
@@ -762,6 +914,16 @@
           },
           "404": {
             "$ref": "#/components/responses/NotFound"
+          },
+          "500": {
+            "description": "Internal server error while fetching the turn status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       },
@@ -789,8 +951,9 @@
             "content": {
               "text/event-stream": {
                 "schema": {
-                  "description": "Server-Sent Events stream. Each line is `event: <type>\\ndata: <JSON>\\n\\n`. Event ordering (P1): `ping* (delta | tool)* citations? (done | error)`. Exactly one terminal event ends the stream.",
+                  "description": "Server-Sent Events stream. Each line is `event: <type>\\ndata: <JSON>\\n\\n`. Event ordering: `stream_started ping* (delta | tool)* citations? (done | error)`. Exactly one terminal event ends the stream.",
                   "oneOf": [
+                    { "$ref": "#/components/schemas/SseStreamStartedEvent" },
                     { "$ref": "#/components/schemas/SseDeltaEvent" },
                     { "$ref": "#/components/schemas/SseToolEvent" },
                     { "$ref": "#/components/schemas/SseCitationsEvent" },
@@ -802,7 +965,7 @@
             }
           },
           "400": {
-            "description": "Turn not in terminal state. Code: `invalid_turn_state`.",
+            "description": "Bad request. Possible causes include empty edited content, invalid turn state, invalid model resolution, or invalid attachment validation.",
             "content": {
               "application/json": {
                 "schema": {
@@ -830,21 +993,18 @@
               }
             }
           },
+          "422": {
+            "description": "Context budget exceeded before regeneration starts. Code: `context_budget_exceeded`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
           "429": {
-            "description": "Quota or rate limit exceeded for regeneration. Code: `quota_exceeded` (with mandatory `quota_scope`: `tokens` or `image_inputs`) for user quota exhaustion (always pre-stream), or `rate_limited` for upstream provider throttling. `rate_limited` may also appear as a terminal SSE `event: error` mid-stream (HTTP 200). Same semantics as sendMessage.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "oneOf": [
-                    { "$ref": "#/components/schemas/QuotaExceededError" },
-                    { "$ref": "#/components/schemas/GenericError" }
-                  ]
-                }
-              }
-            }
-          },
-          "413": {
-            "description": "Image bytes exceeded per-turn limit. Code: `image_bytes_exceeded`.",
+            "description": "Quota or rate limit exceeded for regeneration. Runtime responses use the Problem format; `title` is typically `quota_exceeded` for user quota exhaustion (always pre-stream) or `rate_limited` for upstream provider throttling. `quota_scope` is tracked internally but is not currently included in the response body. Same semantics as sendMessage.",
             "content": {
               "application/json": {
                 "schema": {
@@ -853,28 +1013,8 @@
               }
             }
           },
-          "415": {
-            "description": "Effective model does not support multimodal input. Code: `unsupported_media`. Same semantics as sendMessage.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "502": {
-            "description": "LLM provider error. Code: `provider_error`. Same semantics as sendMessage.",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "504": {
-            "description": "LLM provider timeout. Code: `provider_timeout`. Same semantics as sendMessage.",
+          "500": {
+            "description": "Internal error before the regeneration SSE stream opens. Titles may be `Internal Error` or a generic initialization failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -922,6 +1062,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Internal server error while deleting the turn.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -950,8 +1100,9 @@
             "content": {
               "text/event-stream": {
                 "schema": {
-                  "description": "Server-Sent Events stream. Each line is `event: <type>\\ndata: <JSON>\\n\\n`. Event ordering (P1): `ping* (delta | tool)* citations? (done | error)`. Exactly one terminal event ends the stream.",
+                  "description": "Server-Sent Events stream. Each line is `event: <type>\\ndata: <JSON>\\n\\n`. Event ordering: `stream_started ping* (delta | tool)* citations? (done | error)`. Exactly one terminal event ends the stream.",
                   "oneOf": [
+                    { "$ref": "#/components/schemas/SseStreamStartedEvent" },
                     { "$ref": "#/components/schemas/SseDeltaEvent" },
                     { "$ref": "#/components/schemas/SseToolEvent" },
                     { "$ref": "#/components/schemas/SseCitationsEvent" },
@@ -963,7 +1114,7 @@
             }
           },
           "400": {
-            "description": "Turn not in terminal state. Code: `invalid_turn_state`.",
+            "description": "Bad request before the SSE stream opens. Possible causes include `invalid_turn_state` or model resolution failure.",
             "content": {
               "application/json": {
                 "schema": {
@@ -991,15 +1142,32 @@
               }
             }
           },
-          "429": {
-            "description": "Quota or rate limit exceeded for regeneration. Code: `quota_exceeded` (with mandatory `quota_scope`: `tokens` or `image_inputs`) for user quota exhaustion (always pre-stream), or `rate_limited` for upstream provider throttling. `rate_limited` may also appear as a terminal SSE `event: error` mid-stream (HTTP 200). Same semantics as sendMessage.",
+          "422": {
+            "description": "Context budget exceeded before regeneration starts. Code: `context_budget_exceeded`.",
             "content": {
               "application/json": {
                 "schema": {
-                  "oneOf": [
-                    { "$ref": "#/components/schemas/QuotaExceededError" },
-                    { "$ref": "#/components/schemas/GenericError" }
-                  ]
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "Quota or rate limit exceeded for regeneration. Runtime responses use the Problem format; `title` is typically `quota_exceeded` for user quota exhaustion (always pre-stream) or `rate_limited` for upstream provider throttling. `quota_scope` is tracked internally but is not currently included in the response body. Same semantics as sendMessage.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal error before the retry SSE stream opens. Titles may be `Internal Error` or a generic initialization failure.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
                 }
               }
             }
@@ -1051,7 +1219,7 @@
             }
           },
           "400": {
-            "description": "Target is not an assistant message. Code: `invalid_reaction_target`.",
+            "description": "Invalid reaction value or invalid reaction target. Examples: unsupported reaction value validation failure or code `invalid_reaction_target`.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1068,6 +1236,16 @@
           },
           "404": {
             "description": "Chat or message not found. Code: `chat_not_found` or `message_not_found`.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error while setting the reaction.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1102,6 +1280,16 @@
                 }
               }
             }
+          },
+          "500": {
+            "description": "Internal server error while removing the reaction.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1128,6 +1316,16 @@
           },
           "403": {
             "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "description": "Internal server error while listing models.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1162,6 +1360,107 @@
           },
           "404": {
             "$ref": "#/components/responses/ModelNotFound"
+          },
+          "500": {
+            "description": "Internal server error while fetching model details.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/quota/status": {
+      "get": {
+        "operationId": "getQuotaStatus",
+        "tags": ["quota"],
+        "summary": "Get quota status for the authenticated user",
+        "description": "Returns per-tier, per-period quota usage, remaining credits, warning flags, and the configured warning threshold. Useful for at-rest quota queries outside of a streaming turn.",
+        "responses": {
+          "200": {
+            "description": "Quota status with remaining percentages and warning flags.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuotaStatusResponse"
+                },
+                "example": {
+                  "tiers": [
+                    {
+                      "tier": "premium",
+                      "periods": [
+                        {
+                          "period": "daily",
+                          "limit_credits_micro": 5000000,
+                          "used_credits_micro": 4200000,
+                          "remaining_credits_micro": 800000,
+                          "remaining_percentage": 16,
+                          "next_reset": "2025-06-16T00:00:00Z",
+                          "warning": true,
+                          "exhausted": false
+                        },
+                        {
+                          "period": "monthly",
+                          "limit_credits_micro": 100000000,
+                          "used_credits_micro": 35000000,
+                          "remaining_credits_micro": 65000000,
+                          "remaining_percentage": 65,
+                          "next_reset": "2025-07-01T00:00:00Z",
+                          "warning": false,
+                          "exhausted": false
+                        }
+                      ]
+                    },
+                    {
+                      "tier": "total",
+                      "periods": [
+                        {
+                          "period": "daily",
+                          "limit_credits_micro": 10000000,
+                          "used_credits_micro": 4800000,
+                          "remaining_credits_micro": 5200000,
+                          "remaining_percentage": 52,
+                          "next_reset": "2025-06-16T00:00:00Z",
+                          "warning": false,
+                          "exhausted": false
+                        },
+                        {
+                          "period": "monthly",
+                          "limit_credits_micro": 200000000,
+                          "used_credits_micro": 42000000,
+                          "remaining_credits_micro": 158000000,
+                          "remaining_percentage": 79,
+                          "next_reset": "2025-07-01T00:00:00Z",
+                          "warning": false,
+                          "exhausted": false
+                        }
+                      ]
+                    }
+                  ],
+                  "warning_threshold_pct": 80
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "500": {
+            "description": "Internal server error while fetching quota status.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1247,15 +1546,6 @@
           "type": "string"
         }
       },
-      "ODataSelect": {
-        "name": "$select",
-        "in": "query",
-        "required": false,
-        "description": "OData v4 field projection. Comma-separated list of top-level fields. Case-insensitive.",
-        "schema": {
-          "type": "string"
-        }
-      },
       "ODataOrderBy": {
         "name": "$orderby",
         "in": "query",
@@ -1319,68 +1609,63 @@
     },
     "schemas": {
       "ErrorResponse": {
-        "description": "Standard error envelope for JSON error responses and SSE terminal error events. Error messages and codes MUST NOT contain provider-scoped identifiers (provider_file_id, vector_store_id, deployment names). All error codes are stable internal codes.",
-        "oneOf": [
-          { "$ref": "#/components/schemas/QuotaExceededError" },
-          { "$ref": "#/components/schemas/GenericError" }
-        ]
-      },
-      "GenericError": {
         "type": "object",
-        "required": ["code", "message"],
-        "description": "Error response for all non-quota error codes. No provider identifiers in any field.",
+        "required": ["type", "title", "status", "detail", "instance", "code"],
+        "description": "Problem Details error envelope returned by mini-chat JSON errors and SSE terminal error events. Matches the runtime `Problem` serialization. In current handlers, the stable application error token is often carried in `title`; `code` may be an empty string unless explicitly populated. Error text MUST NOT contain provider-scoped identifiers (provider_file_id, vector_store_id, deployment names, upstream error bodies).",
         "properties": {
+          "type": {
+            "type": "string",
+            "description": "Problem type URI. Current handlers typically return `about:blank`."
+          },
+          "title": {
+            "type": "string",
+            "description": "Short problem summary. In current mini-chat handlers this often carries the application error token, for example `invalid_attachment`, `quota_exceeded`, or `web_search_disabled`."
+          },
+          "status": {
+            "type": "integer",
+            "description": "HTTP status code for this occurrence of the problem."
+          },
+          "detail": {
+            "type": "string",
+            "description": "Human-readable explanation specific to this occurrence of the problem."
+          },
+          "instance": {
+            "type": "string",
+            "description": "Problem instance URI. Current handlers typically return an empty string."
+          },
           "code": {
             "type": "string",
-            "description": "Canonical error code.",
-            "enum": [
-              "invalid_request",
-              "feature_not_licensed",
-              "insufficient_permissions",
-              "chat_not_found",
-              "message_not_found",
-              "model_not_found",
-              "generation_in_progress",
-              "request_id_conflict",
-              "rate_limited",
-              "web_search_disabled",
-              "file_too_large",
-              "unsupported_file_type",
-              "too_many_images",
-              "image_bytes_exceeded",
-              "unsupported_media",
-              "provider_error",
-              "provider_timeout",
-              "not_latest_turn",
-              "invalid_turn_state",
-              "invalid_reaction_target",
-              "attachment_locked",
-              "web_search_calls_exceeded"
-            ]
+            "description": "Machine-readable application code. Always present in the payload; may be an empty string when the handler does not populate it explicitly."
           },
-          "message": {
-            "type": "string",
-            "description": "Human-readable error description. MUST NOT contain provider-scoped identifiers (provider_file_id, vector_store_id, deployment names, upstream error bodies)."
+          "trace_id": {
+            "type": ["string", "null"],
+            "description": "Trace identifier useful for correlating server logs."
+          },
+          "errors": {
+            "type": ["array", "null"],
+            "description": "Optional list of validation violations for validation-style errors.",
+            "items": {
+              "$ref": "#/components/schemas/ValidationViolation"
+            }
           }
         }
       },
-      "QuotaExceededError": {
+      "ValidationViolation": {
         "type": "object",
-        "required": ["code", "message", "quota_scope"],
-        "description": "Error response for quota exhaustion. The quota_scope field is REQUIRED and distinguishes token quota exhaustion, upload quota exhaustion, web search quota exhaustion, and image input quota exhaustion. No provider identifiers in any field.",
+        "required": ["field", "message"],
+        "description": "Single validation violation entry included in `ErrorResponse.errors` when field-level validation details are available.",
         "properties": {
-          "code": {
+          "field": {
             "type": "string",
-            "enum": ["quota_exceeded"]
+            "description": "Field path, for example `email` or `user.email`."
           },
           "message": {
             "type": "string",
-            "description": "Human-readable error description. MUST NOT contain provider-scoped identifiers."
+            "description": "Human-readable message describing the validation error."
           },
-          "quota_scope": {
-            "type": "string",
-            "enum": ["tokens", "uploads", "web_search", "image_inputs"],
-            "description": "Distinguishes token quota exhaustion (tokens), upload quota exhaustion (uploads), web search quota exhaustion (web_search), and image input quota exhaustion (image_inputs). Clients MUST use this field, not message parsing, to determine quota scope."
+          "code": {
+            "type": ["string", "null"],
+            "description": "Optional machine-readable validation code for this violation."
           }
         }
       },
@@ -1488,12 +1773,13 @@
       },
       "Attachment": {
         "type": "object",
-        "required": ["attachment_id", "status", "kind", "filename", "content_type", "size_bytes", "created_at"],
+        "required": ["id", "status", "kind", "filename", "content_type", "size_bytes", "created_at"],
         "description": "File attachment (document or image) on a chat.",
         "properties": {
-          "attachment_id": {
+          "id": {
             "type": "string",
-            "format": "uuid"
+            "format": "uuid",
+            "description": "Attachment UUID."
           },
           "status": {
             "type": "string",
@@ -1560,7 +1846,7 @@
           "error_code": {
             "type": "string",
             "nullable": true,
-            "description": "Terminal error code when state is 'error'. Disambiguates failure cause. Common values: 'provider_error' (LLM provider returned terminal error), 'provider_timeout' (provider request timed out), 'orphan_timeout' (turn stuck beyond watchdog timeout — system timeout, NOT provider failure; stream ended without provider terminal event), 'context_length_exceeded' (preflight rejection), 'quota_overshoot_exceeded' (actual usage exceeded overshoot tolerance). Null for non-error terminal states and while running. CRITICAL: 'orphan_timeout' indicates a SYSTEM timeout (pod crash, network partition, orphan watchdog cleanup), not a provider-side error. UX SHOULD display 'Request timed out. Please try again.' for orphan_timeout, NOT 'Provider error.' Support and analytics: orphan_timeout metrics should be tracked separately from provider_error to distinguish infrastructure issues from LLM provider issues. Mapped from internal chat_turns.error_code. Provider identifiers and billing outcome are not exposed."
+            "description": "Terminal error code when state is 'error'. Disambiguates failure cause. Common values: 'provider_error' (LLM provider returned terminal error), 'provider_timeout' (provider request timed out), 'orphan_timeout' (turn stuck beyond watchdog timeout — system timeout, NOT provider failure; stream ended without provider terminal event), 'context_budget_exceeded' (preflight rejection), 'quota_overshoot_exceeded' (actual usage exceeded overshoot tolerance). Null for non-error terminal states and while running. CRITICAL: 'orphan_timeout' indicates a SYSTEM timeout (pod crash, network partition, orphan watchdog cleanup), not a provider-side error. UX SHOULD display 'Request timed out. Please try again.' for orphan_timeout, NOT 'Provider error.' Support and analytics: orphan_timeout metrics should be tracked separately from provider_error to distinguish infrastructure issues from LLM provider issues. Mapped from internal chat_turns.error_code. Provider identifiers and billing outcome are not exposed."
           },
           "assistant_message_id": {
             "type": "string",
@@ -1670,6 +1956,27 @@
           }
         }
       },
+      "SseStreamStartedEvent": {
+        "type": "object",
+        "required": ["request_id", "message_id", "is_new_turn"],
+        "description": "SSE `event: stream_started` payload. First event in every SSE stream (both new generations and replays). Carries the server-assigned request_id, assistant message_id, and is_new_turn flag.",
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Server-assigned request ID for this turn."
+          },
+          "message_id": {
+            "type": "string",
+            "format": "uuid",
+            "description": "Assistant message ID. Pre-allocated for new generations; persisted ID for replays. Allows clients to reference the assistant message before the stream completes."
+          },
+          "is_new_turn": {
+            "type": "boolean",
+            "description": "true for a live generation (new turn); false when the stream replays an already-completed turn (idempotent replay)."
+          }
+        }
+      },
       "SseDeltaEvent": {
         "type": "object",
         "required": ["type", "content"],
@@ -1736,7 +2043,8 @@
             "description": "Citation source type. P1: \"file\" and \"web\" (when web search is enabled)."
           },
           "title": {
-            "type": "string"
+            "type": "string",
+            "description": "Citation title. For file citations (source=\"file\"), contains the original uploaded filename (e.g. \"Q3_Report.pdf\"). For web citations (source=\"web\"), contains the page title."
           },
           "url": {
             "type": "string",
@@ -1779,16 +2087,13 @@
       },
       "SseDoneEvent": {
         "type": "object",
-        "required": ["message_id", "usage", "effective_model", "selected_model", "quota_decision"],
-        "description": "SSE `event: done` payload. Terminal event finalizing the stream with usage and model selection metadata. Used for both full completions and truncated-but-successful completions (provider `response.incomplete`).",
+        "required": ["usage", "effective_model", "selected_model", "quota_decision"],
+        "description": "SSE `event: done` payload. Terminal event finalizing the stream with usage and model selection metadata. Used for both full completions and truncated-but-successful completions (provider `response.incomplete`). The assistant message_id is provided in the preceding `stream_started` event.",
         "properties": {
-          "message_id": {
-            "type": "string",
-            "format": "uuid",
-            "description": "Persisted assistant message ID."
-          },
           "usage": {
-            "$ref": "#/components/schemas/SseUsage"
+            "nullable": true,
+            "description": "Token usage for this turn. Null when usage is unavailable (e.g. provider error before any tokens were consumed).",
+            "allOf": [{ "$ref": "#/components/schemas/SseUsage" }]
           },
           "effective_model": {
             "type": "string",
@@ -1811,6 +2116,22 @@
             "type": "string",
             "enum": ["premium_quota_exhausted", "force_standard_tier", "disable_premium_tier", "model_disabled"],
             "description": "Why downgrade occurred. Present only when quota_decision=\"downgrade\". Values: premium_quota_exhausted (user quota exhausted); force_standard_tier (operator kill switch: premium tier forcibly disabled for this tenant); disable_premium_tier (operator kill switch: premium tier globally disabled); model_disabled (operator kill switch: selected model global_enabled=false)."
+          },
+          "quota_warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QuotaWarning"
+            },
+            "description": "Per-tier, per-period quota warning entries. Present on CAS-winning completed/incomplete turns. Absent on error, cancelled, replay, and CAS-loser paths. May be an empty array when all periods are healthy.",
+            "example": [
+              {
+                "tier": "premium",
+                "period": "daily",
+                "remaining_percentage": 12,
+                "warning": true,
+                "exhausted": false
+              }
+            ]
           },
           "completion_signal": {
             "type": ["object", "null"],
@@ -1855,11 +2176,8 @@
         }
       },
       "SseErrorEvent": {
-        "description": "SSE `event: error` payload. Terminal event indicating a failure after the stream has started. Shares the same error envelope as JSON error responses: GenericError for all non-quota errors, QuotaExceededError (with required quota_scope) when code is quota_exceeded. Error messages MUST NOT contain provider-scoped identifiers.",
-        "oneOf": [
-          { "$ref": "#/components/schemas/QuotaExceededError" },
-          { "$ref": "#/components/schemas/GenericError" }
-        ]
+        "description": "SSE `event: error` payload. Terminal event indicating a failure after the stream has started. Uses the same Problem Details envelope as JSON error responses.",
+        "$ref": "#/components/schemas/ErrorResponse"
       },
       "WebSearchOption": {
         "type": "object",
@@ -2043,6 +2361,134 @@
               "$ref": "#/components/schemas/Model"
             }
           }
+        }
+      },
+      "QuotaStatusResponse": {
+        "type": "object",
+        "required": ["tiers", "warning_threshold_pct"],
+        "description": "Full quota status for the authenticated user, broken down by tier and period.",
+        "properties": {
+          "tiers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QuotaTierStatus"
+            },
+            "description": "Quota breakdown per tier (premium, total)."
+          },
+          "warning_threshold_pct": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Configured warning threshold percentage. Periods with remaining_percentage at or below this value have warning=true."
+          }
+        }
+      },
+      "QuotaTierStatus": {
+        "type": "object",
+        "required": ["tier", "periods"],
+        "description": "Quota status for a single tier.",
+        "properties": {
+          "tier": {
+            "$ref": "#/components/schemas/QuotaTier"
+          },
+          "periods": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QuotaPeriodStatus"
+            },
+            "description": "Quota details per period within this tier."
+          }
+        }
+      },
+      "QuotaPeriodStatus": {
+        "type": "object",
+        "required": ["period", "limit_credits_micro", "used_credits_micro", "remaining_credits_micro", "remaining_percentage", "next_reset", "warning", "exhausted"],
+        "description": "Quota details for a single period within a tier.",
+        "properties": {
+          "period": {
+            "$ref": "#/components/schemas/QuotaPeriod"
+          },
+          "limit_credits_micro": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Total credit limit for this period in micro-credits."
+          },
+          "used_credits_micro": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Credits consumed so far in this period in micro-credits."
+          },
+          "remaining_credits_micro": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Credits remaining in this period in micro-credits."
+          },
+          "remaining_percentage": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Percentage of quota remaining (0–100)."
+          },
+          "next_reset": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC 3339 timestamp of next period reset."
+          },
+          "warning": {
+            "type": "boolean",
+            "description": "True when remaining_percentage is at or below warning_threshold_pct."
+          },
+          "exhausted": {
+            "type": "boolean",
+            "description": "True when remaining_percentage is 0."
+          }
+        }
+      },
+      "QuotaTier": {
+        "type": "string",
+        "enum": ["premium", "total"],
+        "description": "Quota tier classification."
+      },
+      "QuotaPeriod": {
+        "type": "string",
+        "enum": ["daily", "monthly"],
+        "description": "Quota period classification."
+      },
+      "QuotaWarning": {
+        "type": "object",
+        "required": ["tier", "period", "remaining_percentage", "warning", "exhausted"],
+        "description": "Per-tier, per-period quota warning entry included in the SSE done event.",
+        "properties": {
+          "tier": {
+            "$ref": "#/components/schemas/QuotaTier"
+          },
+          "period": {
+            "$ref": "#/components/schemas/QuotaPeriod"
+          },
+          "remaining_percentage": {
+            "type": "integer",
+            "format": "uint8",
+            "minimum": 0,
+            "maximum": 100,
+            "description": "Percentage of quota remaining (0–100)."
+          },
+          "warning": {
+            "type": "boolean",
+            "description": "True when remaining_percentage is at or below the configured warning threshold."
+          },
+          "exhausted": {
+            "type": "boolean",
+            "description": "True when remaining_percentage is 0."
+          }
+        },
+        "example": {
+          "tier": "premium",
+          "period": "daily",
+          "remaining_percentage": 8,
+          "warning": true,
+          "exhausted": false
         }
       }
     }

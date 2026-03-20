@@ -10,12 +10,16 @@ use crate::infra::db::repo::chat_repo::ChatRepository as OrmChatRepository;
 use super::ChatService;
 use crate::domain::service::test_helpers::{
     MockThreadSummaryRepo, inmem_db, mock_db_provider, mock_enforcer, mock_model_resolver,
-    mock_thread_summary_repo, test_security_ctx, test_security_ctx_with_id,
+    mock_tenant_only_enforcer, mock_thread_summary_repo, test_security_ctx,
+    test_security_ctx_with_id,
 };
 
 // ── Test Helpers ──
 
-fn build_service(db: modkit_db::Db) -> ChatService<OrmChatRepository, MockThreadSummaryRepo> {
+fn build_service_with_enforcer(
+    db: modkit_db::Db,
+    enforcer: authz_resolver_sdk::PolicyEnforcer,
+) -> ChatService<OrmChatRepository, MockThreadSummaryRepo> {
     let db = mock_db_provider(db);
     let chat_repo = Arc::new(OrmChatRepository::new(modkit_db::odata::LimitCfg {
         default: 20,
@@ -26,9 +30,19 @@ fn build_service(db: modkit_db::Db) -> ChatService<OrmChatRepository, MockThread
         db,
         chat_repo,
         mock_thread_summary_repo(),
-        mock_enforcer(),
+        enforcer,
         mock_model_resolver(),
     )
+}
+
+fn build_service(db: modkit_db::Db) -> ChatService<OrmChatRepository, MockThreadSummaryRepo> {
+    build_service_with_enforcer(db, mock_enforcer())
+}
+
+fn build_service_tenant_only_authz(
+    db: modkit_db::Db,
+) -> ChatService<OrmChatRepository, MockThreadSummaryRepo> {
+    build_service_with_enforcer(db, mock_tenant_only_enforcer())
 }
 
 // ── Tests ──
@@ -834,5 +848,283 @@ async fn list_chats_pagination_backward_cursor() {
     assert_eq!(
         back_ids, page1_ids,
         "Backward navigation must return to page 1 items"
+    );
+}
+
+// ── Tenant-only AuthZ: user isolation via ensure_owner ──
+
+#[tokio::test]
+async fn list_chats_tenant_only_authz_cross_owner_returns_empty() {
+    let db = inmem_db().await;
+    let svc = build_service_tenant_only_authz(db);
+
+    let tenant_id = Uuid::new_v4();
+    let user_a = Uuid::new_v4();
+    let user_b = Uuid::new_v4();
+    let ctx_a = test_security_ctx_with_id(tenant_id, user_a);
+    let ctx_b = test_security_ctx_with_id(tenant_id, user_b);
+
+    // User A creates a chat (AuthZ returns only tenant constraint, no owner_id)
+    svc.create_chat(
+        &ctx_a,
+        NewChat {
+            model: Some("gpt-5.2".to_owned()),
+            title: Some("User A chat".to_owned()),
+            is_temporary: false,
+        },
+    )
+    .await
+    .expect("create failed");
+
+    // User B (same tenant) lists — must still see nothing thanks to ensure_owner
+    let page = svc
+        .list_chats(&ctx_b, &ODataQuery::default())
+        .await
+        .expect("list failed");
+    assert_eq!(
+        page.items.len(),
+        0,
+        "User B must not see User A chats even when AuthZ returns tenant-only constraints"
+    );
+
+    // User A sees their own chat
+    let page = svc
+        .list_chats(&ctx_a, &ODataQuery::default())
+        .await
+        .expect("list failed");
+    assert_eq!(page.items.len(), 1, "User A must see their own chat");
+}
+
+#[tokio::test]
+async fn get_chat_tenant_only_authz_cross_owner_not_found() {
+    let db = inmem_db().await;
+    let svc = build_service_tenant_only_authz(db);
+
+    let tenant_id = Uuid::new_v4();
+    let user_a = Uuid::new_v4();
+    let user_b = Uuid::new_v4();
+    let ctx_a = test_security_ctx_with_id(tenant_id, user_a);
+    let ctx_b = test_security_ctx_with_id(tenant_id, user_b);
+
+    let created = svc
+        .create_chat(
+            &ctx_a,
+            NewChat {
+                model: Some("gpt-5.2".to_owned()),
+                title: Some("User A chat".to_owned()),
+                is_temporary: false,
+            },
+        )
+        .await
+        .expect("create failed");
+
+    // User B (same tenant) tries to get User A's chat — must fail
+    let result = svc.get_chat(&ctx_b, created.id).await;
+    assert!(
+        result.is_err(),
+        "Cross-owner get must fail with tenant-only authz"
+    );
+    assert!(
+        matches!(result.unwrap_err(), DomainError::ChatNotFound { .. }),
+        "Expected ChatNotFound for cross-owner access with tenant-only authz"
+    );
+}
+
+#[tokio::test]
+async fn delete_chat_tenant_only_authz_cross_owner_not_found() {
+    let db = inmem_db().await;
+    let svc = build_service_tenant_only_authz(db);
+
+    let tenant_id = Uuid::new_v4();
+    let user_a = Uuid::new_v4();
+    let user_b = Uuid::new_v4();
+    let ctx_a = test_security_ctx_with_id(tenant_id, user_a);
+    let ctx_b = test_security_ctx_with_id(tenant_id, user_b);
+
+    let created = svc
+        .create_chat(
+            &ctx_a,
+            NewChat {
+                model: Some("gpt-5.2".to_owned()),
+                title: Some("User A chat".to_owned()),
+                is_temporary: false,
+            },
+        )
+        .await
+        .expect("create failed");
+
+    // User B (same tenant) tries to delete — must fail
+    let result = svc.delete_chat(&ctx_b, created.id).await;
+    assert!(
+        result.is_err(),
+        "Cross-owner delete must fail with tenant-only authz"
+    );
+    assert!(
+        matches!(result.unwrap_err(), DomainError::ChatNotFound { .. }),
+        "Expected ChatNotFound for cross-owner delete with tenant-only authz"
+    );
+}
+
+#[tokio::test]
+async fn update_chat_tenant_only_authz_cross_owner_not_found() {
+    let db = inmem_db().await;
+    let svc = build_service_tenant_only_authz(db);
+
+    let tenant_id = Uuid::new_v4();
+    let user_a = Uuid::new_v4();
+    let user_b = Uuid::new_v4();
+    let ctx_a = test_security_ctx_with_id(tenant_id, user_a);
+    let ctx_b = test_security_ctx_with_id(tenant_id, user_b);
+
+    let created = svc
+        .create_chat(
+            &ctx_a,
+            NewChat {
+                model: Some("gpt-5.2".to_owned()),
+                title: Some("User A chat".to_owned()),
+                is_temporary: false,
+            },
+        )
+        .await
+        .expect("create failed");
+
+    // User B (same tenant) tries to update User A's chat — must fail
+    let result = svc
+        .update_chat(
+            &ctx_b,
+            created.id,
+            ChatPatch {
+                title: Some(Some("Hijacked".to_owned())),
+            },
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "Cross-owner update must fail with tenant-only authz"
+    );
+    assert!(
+        matches!(result.unwrap_err(), DomainError::ChatNotFound { .. }),
+        "Expected ChatNotFound for cross-owner update with tenant-only authz"
+    );
+}
+
+// ── Filter by title tests ──
+
+#[tokio::test]
+async fn list_chats_filter_contains_title() {
+    let db = inmem_db().await;
+    let svc = build_service(db);
+    let ctx = test_security_ctx(Uuid::new_v4());
+
+    for title in ["Q3 Financial Report", "Weekly Standup", "Report Draft"] {
+        svc.create_chat(
+            &ctx,
+            NewChat {
+                model: Some("gpt-5.2".to_owned()),
+                title: Some(title.to_owned()),
+                is_temporary: false,
+            },
+        )
+        .await
+        .expect("create failed");
+    }
+
+    // contains(title, 'Report') should match 2 chats
+    let filter = modkit_odata::ast::Expr::Function(
+        "contains".to_owned(),
+        vec![
+            modkit_odata::ast::Expr::Identifier("title".to_owned()),
+            modkit_odata::ast::Expr::Value(modkit_odata::ast::Value::String("Report".to_owned())),
+        ],
+    );
+    let query = ODataQuery::default().with_filter(filter);
+    let page = svc.list_chats(&ctx, &query).await.expect("list failed");
+
+    assert_eq!(page.items.len(), 2, "Expected 2 chats matching 'Report'");
+    assert!(
+        page.items
+            .iter()
+            .all(|c| c.title.as_deref().unwrap_or("").contains("Report")),
+        "All results must contain 'Report' in title"
+    );
+}
+
+#[tokio::test]
+async fn list_chats_filter_contains_title_no_match() {
+    let db = inmem_db().await;
+    let svc = build_service(db);
+    let ctx = test_security_ctx(Uuid::new_v4());
+
+    svc.create_chat(
+        &ctx,
+        NewChat {
+            model: Some("gpt-5.2".to_owned()),
+            title: Some("Weekly Standup".to_owned()),
+            is_temporary: false,
+        },
+    )
+    .await
+    .expect("create failed");
+
+    let filter = modkit_odata::ast::Expr::Function(
+        "contains".to_owned(),
+        vec![
+            modkit_odata::ast::Expr::Identifier("title".to_owned()),
+            modkit_odata::ast::Expr::Value(modkit_odata::ast::Value::String(
+                "xyz_nonexistent".to_owned(),
+            )),
+        ],
+    );
+    let query = ODataQuery::default().with_filter(filter);
+    let page = svc.list_chats(&ctx, &query).await.expect("list failed");
+
+    assert_eq!(page.items.len(), 0, "No chats should match");
+}
+
+#[tokio::test]
+async fn list_chats_filter_contains_title_excludes_null_titles() {
+    let db = inmem_db().await;
+    let svc = build_service(db);
+    let ctx = test_security_ctx(Uuid::new_v4());
+
+    // Chat with title
+    svc.create_chat(
+        &ctx,
+        NewChat {
+            model: Some("gpt-5.2".to_owned()),
+            title: Some("Q3 Report".to_owned()),
+            is_temporary: false,
+        },
+    )
+    .await
+    .expect("create failed");
+
+    // Chat without title (NULL)
+    svc.create_chat(
+        &ctx,
+        NewChat {
+            model: Some("gpt-5.2".to_owned()),
+            title: None,
+            is_temporary: false,
+        },
+    )
+    .await
+    .expect("create failed");
+
+    let filter = modkit_odata::ast::Expr::Function(
+        "contains".to_owned(),
+        vec![
+            modkit_odata::ast::Expr::Identifier("title".to_owned()),
+            modkit_odata::ast::Expr::Value(modkit_odata::ast::Value::String("Report".to_owned())),
+        ],
+    );
+    let query = ODataQuery::default().with_filter(filter);
+    let page = svc.list_chats(&ctx, &query).await.expect("list failed");
+
+    assert_eq!(page.items.len(), 1, "Only the titled chat should match");
+    assert_eq!(
+        page.items[0].title.as_deref(),
+        Some("Q3 Report"),
+        "Matched chat must be the one with title"
     );
 }

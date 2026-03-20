@@ -122,16 +122,7 @@ clippy:
 
 # Validate cypilot artifacts (specs, code, templates)
 cypilot-validate:
-	@if [ ! -d .cypilot/.git ] && [ ! -f .cypilot/.git ]; then \
-		echo "Initializing .cypilot submodule (first run)"; \
-		git submodule update --init --recursive -- .cypilot; \
-	elif git -C .cypilot symbolic-ref -q HEAD >/dev/null 2>&1; then \
-		echo "Skipping .cypilot update (branch checkout detected)"; \
-	else \
-		echo "Updating .cypilot via git submodule update (detached HEAD)"; \
-		git submodule update --init --recursive -- .cypilot; \
-	fi
-	@python3 .cypilot/skills/cypilot/scripts/cypilot.py validate && echo "OK. cypilot validation PASSED" || (echo "ERROR: cypilot validation FAILED"; exit 1)
+	@python3 .cypilot/.core/skills/cypilot/scripts/cypilot.py validate && echo "OK. cypilot validation PASSED" || (echo "ERROR: cypilot validation FAILED"; exit 1)
 
 # Run markdown checks with 'lychee'
 lychee:
@@ -359,7 +350,7 @@ bench-db-longhaul: bench-pg-longhaul bench-mysql-longhaul bench-mariadb-longhaul
 
 # -------- E2E tests --------
 
-.PHONY: e2e e2e-local e2e-local-smoke e2e-docker e2e-docker-smoke
+.PHONY: e2e e2e-local e2e-local-smoke e2e-mini-chat e2e-docker e2e-docker-smoke
 
 # Run E2E tests in Docker (default)
 e2e: e2e-docker
@@ -379,6 +370,14 @@ e2e-local:
 ## Run E2E smoke tests locally (only tests marked @pytest.mark.smoke)
 e2e-local-smoke:
 	python3 scripts/ci.py e2e-local --smoke
+
+MINI_CHAT_FEATURES = mini-chat,static-authn,static-authz,single-tenant,static-credstore
+
+## Run mini-chat E2E tests (separate binary with mini-chat features)
+e2e-mini-chat:
+	cargo build --bin hyperspot-server --features=$(MINI_CHAT_FEATURES)
+	E2E_BINARY=target/debug/hyperspot-server \
+		python3 -m pytest testing/e2e/modules/mini_chat/ --mode offline -vv
 
 # -------- Code coverage --------
 
@@ -472,7 +471,7 @@ example:
 
 ## Run server with mini-chat module
 mini-chat:
-	cargo run --bin hyperspot-server --features mini-chat,static-authn,static-authz,single-tenant,static-credstore -- --config config/mini-chat.yaml run
+	cargo run --bin hyperspot-server --features mini-chat,static-authn,static-authz,single-tenant,static-credstore,otel -- --config config/mini-chat.yaml run
 
 oop-example:
 	cargo build -p calculator --features oop_module

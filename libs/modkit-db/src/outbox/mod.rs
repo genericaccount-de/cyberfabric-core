@@ -25,7 +25,7 @@
 //!
 //! ```ignore
 //! let handle = Outbox::builder(db)
-//!     .poll_interval(Duration::from_millis(100))
+//!     .profile(OutboxProfile::low_latency())
 //!     .queue("orders", Partitions::of(4))
 //!         .decoupled(my_handler)
 //!     .start().await?;
@@ -114,6 +114,8 @@ pub use handler::{
 };
 pub use manager::{OutboxBuilder, OutboxHandle};
 pub use migrations::outbox_migrations;
-pub use types::{EnqueueMessage, OutboxError, OutboxMessageId, Partitions};
+pub use types::{
+    EnqueueMessage, OutboxError, OutboxMessageId, OutboxProfile, Partitions, WorkerTuning,
+};
 
 // Internal re-exports for tests and internal modules

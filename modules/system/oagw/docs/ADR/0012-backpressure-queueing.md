@@ -6,6 +6,45 @@ decision-makers: OAGW Team
 
 # Backpressure and Queueing — Reject and Queue Strategies for Overload Handling
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Strategy 1: Reject (Default)](#strategy-1-reject-default)
+  - [Strategy 2: Queue](#strategy-2-queue)
+  - [Client Signaling](#client-signaling)
+  - [Interaction with Circuit Breaker](#interaction-with-circuit-breaker)
+  - [Deferred: Degrade Strategy](#deferred-degrade-strategy)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Reject strategy](#reject-strategy)
+  - [Queue strategy](#queue-strategy)
+  - [Degrade strategy](#degrade-strategy)
+- [More Information](#more-information)
+  - [Reject Response Example](#reject-response-example)
+  - [Queue Flow](#queue-flow)
+  - [Timeout Handling Response](#timeout-handling-response)
+  - [Request Priority (Future Enhancement)](#request-priority-future-enhancement)
+  - [Memory Management](#memory-management)
+  - [Exponential Backoff Recommendation](#exponential-backoff-recommendation)
+  - [Integration with Concurrency Control](#integration-with-concurrency-control)
+  - [Metrics](#metrics)
+  - [Error Types](#error-types)
+  - [Database Schema](#database-schema)
+  - [Defaults](#defaults)
+  - [Security Considerations](#security-considerations)
+  - [Implementation Phases](#implementation-phases)
+  - [Configuration Validation](#configuration-validation)
+  - [Testing Strategy](#testing-strategy)
+  - [References](#references)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-backpressure-queueing`
 
 ## Context and Problem Statement

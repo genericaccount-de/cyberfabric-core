@@ -1,5 +1,41 @@
 # Feature: HTTP Proxy Engine
 
+
+<!-- toc -->
+
+- [1. Feature Context](#1-feature-context)
+  - [1.1 Overview](#11-overview)
+  - [1.2 Purpose](#12-purpose)
+  - [1.3 Actors](#13-actors)
+  - [1.4 References](#14-references)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
+  - [Proxy HTTP Request](#proxy-http-request)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
+  - [Alias Resolution](#alias-resolution)
+  - [Route Matching](#route-matching)
+  - [Plugin Chain Execution](#plugin-chain-execution)
+  - [Header Transformation](#header-transformation)
+  - [Body Validation](#body-validation)
+  - [Pingora In-Memory Bridge](#pingora-in-memory-bridge)
+  - [Error Source Classification](#error-source-classification)
+- [4. States (CDSL)](#4-states-cdsl)
+- [5. Definitions of Done](#5-definitions-of-done)
+  - [Implement DataPlaneService Proxy Execution](#implement-dataplaneservice-proxy-execution)
+  - [Implement Alias Resolution](#implement-alias-resolution)
+  - [Implement Route Matching](#implement-route-matching)
+  - [Implement Plugin Chain Execution](#implement-plugin-chain-execution)
+  - [Implement Header Transformation](#implement-header-transformation)
+  - [Implement Body Validation](#implement-body-validation)
+  - [Implement Error Source Distinction](#implement-error-source-distinction)
+  - [Implement Pingora Proxy Engine](#implement-pingora-proxy-engine)
+- [6. Acceptance Criteria](#6-acceptance-criteria)
+- [7. Additional Context](#7-additional-context)
+  - [Performance Considerations](#performance-considerations)
+  - [Security Considerations](#security-considerations)
+  - [Deliberate Omissions](#deliberate-omissions)
+
+<!-- /toc -->
+
 - [ ] `p1` - **ID**: `cpt-cf-oagw-featstatus-proxy-engine-implemented`
 
 <!-- reference to DECOMPOSITION entry -->

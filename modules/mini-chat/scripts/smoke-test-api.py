@@ -19,6 +19,7 @@ import json
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from typing import Any
 
 NO_SSE = "--no-sse" in sys.argv
@@ -86,6 +87,45 @@ def request(
 
     if expect_status is not None and status != expect_status:
         fail(f"{method} {path} → {status} (expected {expect_status})\n  {parsed}")
+    return status, parsed
+
+
+def multipart_upload(
+    path: str,
+    filename: str,
+    content: bytes,
+    content_type: str,
+    *,
+    expect_status: int | None = None,
+) -> tuple[int, Any]:
+    """Upload a file via multipart/form-data and return (status_code, parsed_json | None)."""
+    boundary = f"----SmokeBoundary{uuid.uuid4().hex}"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+        f"Content-Type: {content_type}\r\n"
+        f"\r\n"
+    ).encode() + content + f"\r\n--{boundary}--\r\n".encode()
+
+    url = f"{BASE}{path}"
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            status = resp.status
+            raw = resp.read().decode()
+            parsed = json.loads(raw) if raw else None
+    except urllib.error.HTTPError as e:
+        status = e.code
+        raw = e.read().decode()
+        try:
+            parsed = json.loads(raw) if raw else None
+        except json.JSONDecodeError:
+            parsed = raw
+
+    if expect_status is not None and status != expect_status:
+        fail(f"POST {path} (multipart) → {status} (expected {expect_status})\n  {parsed}")
     return status, parsed
 
 
@@ -311,6 +351,148 @@ def test_turns(chat_id: str, messages: list[dict[str, Any]]) -> None:
     test_delete_turn(chat_id, request_ids[-1])
 
 
+def test_upload_attachment(chat_id: str) -> str:
+    """Upload a small text file and return the attachment id."""
+    bold("\n10. Upload attachment (text file)")
+    content = b"Hello from smoke test!\nThis is a sample document for attachment testing."
+    status, data = multipart_upload(
+        f"{PREFIX}/v1/chats/{chat_id}/attachments",
+        filename="smoke-test.txt",
+        content=content,
+        content_type="text/plain",
+        expect_status=201,
+    )
+    print(json.dumps(data, indent=2))
+    att_id = data["id"]
+    if not att_id:
+        fail("No attachment id returned")
+    if data["filename"] != "smoke-test.txt":
+        fail(f"Expected filename='smoke-test.txt', got '{data['filename']}'")
+    if data["content_type"] != "text/plain":
+        fail(f"Expected content_type='text/plain', got '{data['content_type']}'")
+    if data["kind"] != "document":
+        fail(f"Expected kind='document', got '{data['kind']}'")
+    if data["size_bytes"] != len(content):
+        fail(f"Expected size_bytes={len(content)}, got {data['size_bytes']}")
+    if data["status"] not in ("pending", "uploaded", "ready"):
+        fail(f"Unexpected status: {data['status']}")
+    ok(f"Uploaded attachment: {att_id} (status={data['status']})")
+    return att_id
+
+
+def test_get_attachment(chat_id: str, attachment_id: str) -> None:
+    bold("\n11. Get attachment")
+    _, data = request(
+        "GET", f"{PREFIX}/v1/chats/{chat_id}/attachments/{attachment_id}",
+        expect_status=200,
+    )
+    print(json.dumps(data, indent=2))
+    if data["id"] != attachment_id:
+        fail(f"Expected id={attachment_id}, got {data['id']}")
+    ok(f"Got attachment: {attachment_id}")
+
+
+def test_upload_unsupported_type(chat_id: str) -> None:
+    bold("\n12. Upload unsupported file type (expect 415)")
+    status, data = multipart_upload(
+        f"{PREFIX}/v1/chats/{chat_id}/attachments",
+        filename="bad-file.exe",
+        content=b"\x00\x01\x02\x03",
+        content_type="application/octet-stream",
+    )
+    if status != 415:
+        fail(f"Expected 415 for unsupported type, got {status}\n  {data}")
+    ok("Correctly rejected unsupported file type (415)")
+
+
+def test_send_message_with_attachment(
+    chat_id: str, attachment_id: str,
+) -> str | None:
+    bold("\n13. Send message with attachment (SSE stream)")
+    if NO_SSE:
+        skip("configure a real API key to test")
+        return None
+    lines, msg_id = sse_request(
+        f"{PREFIX}/v1/chats/{chat_id}/messages:stream",
+        {"content": "Summarize the attached file in one sentence.", "attachment_ids": [attachment_id]},
+    )
+    output = "\n".join(lines)
+    print(output)
+    if "event: done" in output:
+        ok(f"Streamed with attachment (msg_id: {msg_id})")
+    elif "event: error" in output:
+        fail("Stream returned error")
+    else:
+        fail("Unexpected SSE output")
+    return msg_id
+
+
+def test_messages_have_attachments(chat_id: str) -> None:
+    """Verify that listing messages includes attachment summaries."""
+    bold("\n14. Verify attachments in message list")
+    if NO_SSE:
+        skip("no messages to check")
+        return
+    _, data = request(
+        "GET", f"{PREFIX}/v1/chats/{chat_id}/messages", expect_status=200,
+    )
+    # Find user messages that should have attachments
+    user_msgs_with_att = [
+        m for m in data["items"]
+        if m["role"] == "user" and m.get("attachments")
+    ]
+    if not user_msgs_with_att:
+        fail("Expected at least one user message with attachments")
+    att = user_msgs_with_att[0]["attachments"][0]
+    print(f"  attachment_id: {att['attachment_id']}, kind: {att['kind']}, filename: {att['filename']}")
+    ok(f"Found {len(user_msgs_with_att)} user message(s) with attachments")
+
+
+def test_delete_attachment_conflict(chat_id: str, attachment_id: str) -> None:
+    """Attachment referenced by a message should return 409."""
+    bold("\n15. Delete referenced attachment (expect 409)")
+    if NO_SSE:
+        skip("no message references — attachment not linked")
+        return
+    status, data = request(
+        "DELETE", f"{PREFIX}/v1/chats/{chat_id}/attachments/{attachment_id}",
+    )
+    if status != 409:
+        fail(f"Expected 409 Conflict for referenced attachment, got {status}\n  {data}")
+    ok("Correctly refused to delete referenced attachment (409)")
+
+
+def test_delete_attachment(chat_id: str, attachment_id: str) -> None:
+    """Delete an unreferenced attachment."""
+    bold("\n16. Delete unreferenced attachment")
+    # Upload a fresh attachment that is NOT referenced by any message
+    content = b"disposable content"
+    _, upload_data = multipart_upload(
+        f"{PREFIX}/v1/chats/{chat_id}/attachments",
+        filename="disposable.txt",
+        content=content,
+        content_type="text/plain",
+        expect_status=201,
+    )
+    temp_id = upload_data["id"]
+    ok(f"Uploaded temp attachment: {temp_id}")
+
+    status, _ = request(
+        "DELETE", f"{PREFIX}/v1/chats/{chat_id}/attachments/{temp_id}",
+    )
+    if status != 204:
+        fail(f"Delete attachment returned {status}")
+    ok(f"Deleted attachment {temp_id}")
+
+    # Verify it's gone (404)
+    status, _ = request(
+        "GET", f"{PREFIX}/v1/chats/{chat_id}/attachments/{temp_id}",
+    )
+    if status != 404:
+        fail(f"Expected 404 after deletion, got {status}")
+    ok("Confirmed attachment is gone (404)")
+
+
 def test_delete_chat(chat_id: str) -> None:
     bold("\n9. Delete test chat")
     status, _ = request("DELETE", f"{PREFIX}/v1/chats/{chat_id}")
@@ -338,6 +520,16 @@ def main() -> None:
     messages = test_list_messages(chat_id, expected_count=4)
     test_reactions(chat_id, msg1_id)
     test_turns(chat_id, messages)
+
+    # -- Attachments --
+    att_id = test_upload_attachment(chat_id)
+    test_get_attachment(chat_id, att_id)
+    test_upload_unsupported_type(chat_id)
+    test_send_message_with_attachment(chat_id, att_id)
+    test_messages_have_attachments(chat_id)
+    test_delete_attachment_conflict(chat_id, att_id)
+    test_delete_attachment(chat_id, att_id)
+
     test_delete_chat(chat_id)
 
     bold("\nAll checks passed!")

@@ -1,5 +1,36 @@
 # Feature: Multi-Tenant Configuration Hierarchy
 
+
+<!-- toc -->
+
+- [1. Feature Context](#1-feature-context)
+  - [1.1 Overview](#11-overview)
+  - [1.2 Purpose](#12-purpose)
+  - [1.3 Actors](#13-actors)
+  - [1.4 References](#14-references)
+  - [1.5 Out of Scope](#15-out-of-scope)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
+  - [Ancestor Shares Upstream](#ancestor-shares-upstream)
+  - [Descendant Binds to Inherited Upstream](#descendant-binds-to-inherited-upstream)
+  - [Alias Resolution with Shadowing](#alias-resolution-with-shadowing)
+  - [Enforced Constraint Validation](#enforced-constraint-validation)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
+  - [Hierarchical Config Merge](#hierarchical-config-merge)
+  - [Alias Shadowing Resolution](#alias-shadowing-resolution)
+  - [Permission Validation for Override](#permission-validation-for-override)
+  - [Effective Rate Limit Computation](#effective-rate-limit-computation)
+- [4. States (CDSL)](#4-states-cdsl)
+- [5. Definitions of Done](#5-definitions-of-done)
+  - [Implement Sharing Mode Fields](#implement-sharing-mode-fields)
+  - [Implement Hierarchical Config Merge](#implement-hierarchical-config-merge)
+  - [Implement Alias Shadowing](#implement-alias-shadowing)
+  - [Implement Permission-Based Override Control](#implement-permission-based-override-control)
+  - [Implement Secret Access Control Integration](#implement-secret-access-control-integration)
+- [6. Acceptance Criteria](#6-acceptance-criteria)
+- [7. Non-Applicable Concerns](#7-non-applicable-concerns)
+
+<!-- /toc -->
+
 - [ ] `p2` - **ID**: `cpt-cf-oagw-featstatus-tenant-hierarchy-implemented`
 
 <!-- reference to DECOMPOSITION entry -->

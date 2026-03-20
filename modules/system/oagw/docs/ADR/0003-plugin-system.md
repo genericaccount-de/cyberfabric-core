@@ -6,6 +6,34 @@ decision-makers: OAGW Team
 
 # Plugin System — Three Plugin Types with Trait-Based Extensibility
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Plugin Types](#plugin-types)
+  - [Plugin Traits](#plugin-traits)
+  - [Execution Order](#execution-order)
+  - [Built-in Plugins](#built-in-plugins)
+  - [External Plugins](#external-plugins)
+  - [Plugin Loading](#plugin-loading)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Three plugin types with separate traits](#three-plugin-types-with-separate-traits)
+  - [Single generic Extension trait](#single-generic-extension-trait)
+  - [Starlark-only interpreted plugins](#starlark-only-interpreted-plugins)
+- [Appendix A: Starlark Custom Plugin Examples](#appendix-a-starlark-custom-plugin-examples)
+  - [Custom Guard Plugin](#custom-guard-plugin)
+  - [Custom Transform Plugin — PII Redactor](#custom-transform-plugin--pii-redactor)
+  - [Custom Transform Plugin — Path Rewriter](#custom-transform-plugin--path-rewriter)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-plugin-system`
 
 ## Context and Problem Statement

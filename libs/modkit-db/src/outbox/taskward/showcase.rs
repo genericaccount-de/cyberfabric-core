@@ -2,13 +2,14 @@
 //! realistic settings. Each test tells a story — the name describes the
 //! situation, the body shows how the worker handles it.
 //!
-//! Durations are scaled down (hours → milliseconds) so tests complete fast.
+//! All tests use `start_paused = true` (tokio virtual time) so durations
+//! are realistic (hours, seconds) yet tests complete instantly.
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     use tokio::sync::Notify;
     use tokio_util::sync::CancellationToken;
@@ -18,6 +19,8 @@ mod tests {
         BackoffConfig, Bulkhead, BulkheadConfig, ConcurrencyLimit,
     };
     use crate::outbox::taskward::listener::TracingListener;
+    use crate::outbox::taskward::pacing::PacingConfig;
+    use crate::outbox::taskward::poker::poker;
     use crate::outbox::taskward::task::{PanicPolicy, WorkerBuilder};
 
     // ---- Scenario: Long-interval worker reschedules immediately when work
@@ -28,8 +31,6 @@ mod tests {
     // But one day the batch is huge — work takes 5 h, overshooting the
     // 4 h window. The action returns `Proceed` so the worker retries
     // immediately instead of waiting for the next poke.
-    //
-    // Scaled: 4h → 80ms, 2h → 40ms, 5h → 100ms, 1h → 20ms.
 
     struct BatchProcessor {
         /// Durations of simulated work per call.
@@ -64,10 +65,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn long_interval_worker_reschedules_when_work_exceeds_window() {
-        // Scale: 1h = 20ms, so 4h = 80ms, 2h = 40ms, 5h = 100ms.
-        let h = Duration::from_millis(20); // 1 "hour"
+        let h = Duration::from_secs(3600); // 1 hour (virtual time, runs instantly)
 
         let cancel = CancellationToken::new();
         let call_count = Arc::new(AtomicU32::new(0));
@@ -82,18 +82,20 @@ mod tests {
             call_count: call_count.clone(),
         };
 
+        let (poker_notify, _poker_handle) = poker(h * 4, cancel.clone());
         let worker = WorkerBuilder::new("batch-processor", cancel.clone())
-            .with_poker(h * 4) // 4h poker
+            .notifier(poker_notify)
+            .pacing(PacingConfig::default())
             .build(action);
 
-        // Cancel after 16h scaled — enough for 3 calls + some idle.
+        // Cancel after 16h — enough for 3 calls + some idle.
         let cancel_c = cancel.clone();
         tokio::spawn(async move {
             tokio::time::sleep(h * 16).await;
             cancel_c.cancel();
         });
 
-        let start = Instant::now();
+        let start = tokio::time::Instant::now();
         worker.run().await;
 
         // At least 3 calls happened. Call 3 was the immediate retry after
@@ -136,8 +138,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn event_driven_worker_ignores_long_poker_when_notified() {
+        let h = Duration::from_secs(3600);
+
         let cancel = CancellationToken::new();
         let notify = Arc::new(Notify::new());
         let call_count = Arc::new(AtomicU32::new(0));
@@ -146,39 +150,41 @@ mod tests {
             call_count: call_count.clone(),
         };
 
-        // Poker fires every 5s (safety net) — but notifiers fire much sooner.
+        // Poker fires every 5h (safety net) — but notifiers fire much sooner.
+        let (poker_notify, _poker_handle) = poker(h * 5, cancel.clone());
         let worker = WorkerBuilder::new("event-worker", cancel.clone())
+            .notifier(poker_notify)
             .notifier(notify.clone())
-            .with_poker(Duration::from_secs(5))
+            .pacing(PacingConfig::default())
             .build(action);
 
         // Stored permit → initial Idle resolves immediately.
         notify.notify_one();
         let notify_c = notify.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            tokio::time::sleep(h).await;
             notify_c.notify_one(); // call 2
-            tokio::time::sleep(Duration::from_millis(30)).await;
+            tokio::time::sleep(h).await;
             notify_c.notify_one(); // call 3
         });
 
         let cancel_c = cancel.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(h * 4).await;
             cancel_c.cancel();
         });
 
-        let start = Instant::now();
+        let start = tokio::time::Instant::now();
         worker.run().await;
 
         assert_eq!(
             call_count.load(Ordering::SeqCst),
             3,
-            "expected 3 event-driven calls, not waiting for 5s poker",
+            "expected 3 event-driven calls, not waiting for 5h poker",
         );
-        // All 3 calls happen within 200ms — well before the 5s poker.
+        // All 3 calls happen within 4h — well before the 5h poker.
         assert!(
-            start.elapsed() < Duration::from_secs(1),
+            start.elapsed() < h * 5,
             "should complete fast via notifiers, not wait for poker",
         );
     }
@@ -199,27 +205,27 @@ mod tests {
             self.results
                 .get(idx)
                 .cloned()
-                .unwrap_or(Ok(Directive::sleep(Duration::from_secs(60))))
+                .unwrap_or(Ok(Directive::sleep(Duration::from_secs(3600))))
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn transient_errors_backoff_then_recover() {
-        // 3 consecutive errors → escalating backoff (10ms, 20ms, 40ms = 70ms)
+        // 3 consecutive errors → escalating backoff (1s, 2s, 4s = 7s)
         // Then success → backoff resets.
-        // Then another error → backoff starts from 10ms again (not 80ms).
+        // Then another error → backoff starts from 1s again (not 8s).
 
         let cancel = CancellationToken::new();
         let call_count = Arc::new(AtomicU32::new(0));
 
         let action = FlakyAction {
             results: vec![
-                Err("db timeout".into()), // backoff → 10ms
-                Err("db timeout".into()), // backoff → 20ms
-                Err("db timeout".into()), // backoff → 40ms
+                Err("db timeout".into()), // backoff → 1s
+                Err("db timeout".into()), // backoff → 2s
+                Err("db timeout".into()), // backoff → 4s
                 Ok(Directive::proceed()), // reset backoff
-                Err("db timeout".into()), // backoff → 10ms (reset!)
-                Ok(Directive::sleep(Duration::from_secs(60))),
+                Err("db timeout".into()), // backoff → 1s (reset!)
+                Ok(Directive::sleep(Duration::from_secs(3600))),
             ],
             call_count: call_count.clone(),
         };
@@ -229,28 +235,44 @@ mod tests {
             BulkheadConfig {
                 semaphore: ConcurrencyLimit::Unlimited,
                 backoff: BackoffConfig {
-                    initial: Duration::from_millis(10),
-                    max: Duration::from_secs(60),
+                    initial: Duration::from_secs(1),
+                    max: Duration::from_secs(3600),
                     multiplier: 2.0,
                     jitter: 0.0,
                 },
-                steady_pace: Duration::ZERO,
             },
         );
+
+        let notify = Arc::new(Notify::new());
+        notify.notify_one(); // break initial Idle
 
         let worker = WorkerBuilder::new("flaky-worker", cancel.clone())
             .bulkhead(bulkhead)
             .listener(TracingListener)
-            .with_poker(Duration::from_millis(1))
+            .pacing(PacingConfig {
+                active_interval: Duration::ZERO,
+                min_interval: Duration::ZERO,
+                ramp_step: Duration::ZERO,
+            })
+            .notifier(notify.clone())
             .build(action);
+
+        // Fire notifies to wake from each error-Idle (4 errors → 4 notifies)
+        let notify_c = notify.clone();
+        tokio::spawn(async move {
+            for _ in 0..4 {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                notify_c.notify_one();
+            }
+        });
 
         let cancel_c = cancel.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::time::sleep(Duration::from_secs(3600)).await;
             cancel_c.cancel();
         });
 
-        let start = Instant::now();
+        let start = tokio::time::Instant::now();
         worker.run().await;
 
         assert_eq!(
@@ -258,8 +280,8 @@ mod tests {
             6,
             "all 6 calls should complete -- errors absorbed by bulkhead",
         );
-        // Total backoff: 10 + 20 + 40 + 0 (Proceed) + 10 = 80ms minimum.
-        assert!(start.elapsed() >= Duration::from_millis(80));
+        // Total backoff: 1 + 2 + 4 + 0 (Proceed) + 1 = 8s minimum.
+        assert!(start.elapsed() >= Duration::from_secs(8));
     }
 
     // ---- Scenario: Multiple wake sources compose naturally ----
@@ -278,8 +300,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn multiple_notifiers_any_source_wakes_worker() {
+        let h = Duration::from_secs(3600);
+
         // 3 independent event sources — worker wakes on whichever fires first.
         let cancel = CancellationToken::new();
         let source_a = Arc::new(Notify::new());
@@ -295,6 +319,11 @@ mod tests {
         source_a.notify_one();
 
         let worker = WorkerBuilder::new("multi-source", cancel.clone())
+            .pacing(PacingConfig {
+                active_interval: Duration::ZERO,
+                min_interval: Duration::ZERO,
+                ramp_step: Duration::ZERO,
+            })
             .notifier(source_a.clone())
             .notifier(source_b.clone())
             .notifier(source_c.clone())
@@ -302,19 +331,19 @@ mod tests {
 
         let (b, c, a) = (source_b.clone(), source_c.clone(), source_a.clone());
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(h).await;
             b.notify_one(); // source B → call 2
 
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(h).await;
             c.notify_one(); // source C → call 3
 
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            tokio::time::sleep(h).await;
             a.notify_one(); // source A → call 4
         });
 
         let cancel_c = cancel.clone();
         tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+            tokio::time::sleep(h * 6).await;
             cancel_c.cancel();
         });
 
@@ -365,7 +394,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn parallel_workers_share_semaphore_and_notifier() {
         let cancel = CancellationToken::new();
         let notify = Arc::new(Notify::new());
@@ -381,7 +410,7 @@ mod tests {
         for id in 0..4 {
             let action = ParallelAction {
                 _worker_id: id,
-                work_duration: Duration::from_millis(50),
+                work_duration: Duration::from_secs(30),
                 total_calls: total_calls.clone(),
                 max_concurrent: max_concurrent.clone(),
                 current_concurrent: current_concurrent.clone(),
@@ -393,12 +422,11 @@ mod tests {
                 BulkheadConfig {
                     semaphore: ConcurrencyLimit::Fixed(sem.clone()),
                     backoff: BackoffConfig {
-                        initial: Duration::from_millis(10),
-                        max: Duration::from_secs(10),
+                        initial: Duration::from_secs(1),
+                        max: Duration::from_secs(600),
                         multiplier: 2.0,
                         jitter: 0.0,
                     },
-                    steady_pace: Duration::ZERO,
                 },
             );
 
@@ -416,12 +444,12 @@ mod tests {
         tokio::spawn(async move {
             for _ in 0..8 {
                 notify_c.notify_one();
-                tokio::time::sleep(Duration::from_millis(10)).await;
+                tokio::time::sleep(Duration::from_secs(5)).await;
             }
         });
 
         // Let them work, then shut down.
-        tokio::time::sleep(Duration::from_millis(500)).await;
+        tokio::time::sleep(Duration::from_secs(300)).await;
         task_set.shutdown().await;
 
         let calls = total_calls.load(Ordering::SeqCst);
@@ -455,8 +483,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn vacuum_worker_self_schedules_via_sleep() {
+        let h = Duration::from_secs(3600);
+
         // A vacuum worker has no external notifiers — it runs on its own
         // cadence using Sleep directives. A poker breaks the initial Idle.
 
@@ -465,17 +495,20 @@ mod tests {
 
         let action = VacuumAction {
             call_count: call_count.clone(),
-            cooldown: Duration::from_millis(30),
+            cooldown: h, // 1h cooldown between sweeps
         };
 
+        let (poker_notify, _poker_handle) = poker(Duration::from_secs(600), cancel.clone());
+
         let worker = WorkerBuilder::new("vacuum", cancel.clone())
-            .with_poker(Duration::from_millis(10)) // just to break initial Idle
+            .notifier(poker_notify)
+            .pacing(PacingConfig::default()) // 10min poker to break initial Idle
             .build(action);
 
         let cancel_c = cancel.clone();
         tokio::spawn(async move {
-            // 10ms (initial poke) + 3 × 30ms (cooldowns) = 100ms for 3 calls.
-            tokio::time::sleep(Duration::from_millis(120)).await;
+            // 10min (initial poke) + 3 × 1h (cooldowns) = 3h 10m for 3 calls.
+            tokio::time::sleep(h * 4).await;
             cancel_c.cancel();
         });
 
@@ -524,7 +557,7 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn panicking_worker_recovers_and_keeps_running() {
         // The "bad" worker panics on call 0, but the worker loop catches
         // the panic and retries with backoff. It continues executing on
@@ -539,16 +572,19 @@ mod tests {
             call_count: bad_count.clone(),
         };
 
+        let (poker_notify, _poker_handle) = poker(Duration::from_secs(1), cancel.clone());
+
         let bad_worker = WorkerBuilder::new("bad", cancel.clone())
             .notifier(notify.clone())
-            .with_poker(Duration::from_millis(10))
+            .notifier(poker_notify)
+            .pacing(PacingConfig::default())
             .on_panic(PanicPolicy::CatchAndRetry)
             .build(bad_action);
 
         let handle = tokio::spawn(bad_worker.run());
 
         // Let it run — first call panics, subsequent calls succeed.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         cancel.cancel();
         handle.await.unwrap();
 
@@ -560,7 +596,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn panicking_worker_does_not_kill_siblings() {
         // 2 workers in the same TaskSet — "bad" panics on first execute,
         // "good" keeps running. Both survive.
@@ -579,15 +615,20 @@ mod tests {
             call_count: good_count.clone(),
         };
 
+        let (bad_poker, _bad_poker_handle) = poker(Duration::from_secs(1), cancel.clone());
+        let (good_poker, _good_poker_handle) = poker(Duration::from_secs(1), cancel.clone());
+
         let bad_worker = WorkerBuilder::new("bad", cancel.clone())
             .notifier(notify.clone())
-            .with_poker(Duration::from_millis(10))
+            .notifier(bad_poker)
+            .pacing(PacingConfig::default())
             .on_panic(PanicPolicy::CatchAndRetry)
             .build(bad_action);
 
         let good_worker = WorkerBuilder::new("good", cancel.clone())
             .notifier(notify.clone())
-            .with_poker(Duration::from_millis(10))
+            .notifier(good_poker)
+            .pacing(PacingConfig::default())
             .build(good_action);
 
         let mut task_set = crate::outbox::taskward::task_set::TaskSet::new(cancel.clone());
@@ -595,7 +636,7 @@ mod tests {
         task_set.spawn("good", good_worker.run());
 
         // Let them run.
-        tokio::time::sleep(Duration::from_millis(150)).await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
         task_set.shutdown().await;
 
         // "bad" survived the panic — it executed more than once.

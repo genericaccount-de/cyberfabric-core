@@ -6,6 +6,7 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::domain::error::DomainError;
+use crate::domain::model::audit_envelope::AuditEnvelope;
 
 /// Payload for attachment cleanup outbox events.
 ///
@@ -35,16 +36,10 @@ pub struct AttachmentCleanupEvent {
 ///
 /// The `modkit_db::outbox::Outbox` API is partition-based and accepts raw
 /// `Vec<u8>` payloads. Mini-Chat needs a domain-oriented interface that:
-/// - Accepts a typed `UsageEvent` (from `mini-chat-sdk`; serialized by the implementation)
+/// - Accepts typed events (from `mini-chat-sdk`; serialized by the implementation)
 /// - Resolves the queue name and partition from tenant context
 /// - Participates in the caller's transaction via `&dyn DBRunner`
 /// - Returns domain errors, not infra-level `OutboxError`
-///
-/// # Payload type
-///
-/// Uses `UsageEvent` from `mini-chat-sdk` directly — the single canonical
-/// representation of the usage outbox payload. No separate domain payload type
-/// exists. The SDK crate is already a dependency of the domain layer.
 ///
 /// # Implementation note
 ///
@@ -82,9 +77,24 @@ pub trait OutboxEnqueuer: Send + Sync {
         event: AttachmentCleanupEvent,
     ) -> Result<(), DomainError>;
 
+    /// Enqueue an audit event within the caller's transaction.
+    ///
+    /// The implementation MUST:
+    /// - Serialize `event` to `Vec<u8>` (JSON wire format)
+    /// - Insert into the outbox table using the provided `runner` (transaction)
+    /// - Use `queue = "mini-chat.audit"`
+    /// - Derive the partition from the envelope's `tenant_id`
+    ///
+    /// Returns `Ok(())` on success. Returns `Err` on database error.
+    async fn enqueue_audit_event(
+        &self,
+        runner: &(dyn DBRunner + Sync),
+        event: AuditEnvelope,
+    ) -> Result<(), DomainError>;
+
     /// Notify the outbox sequencer that new events are available.
     ///
-    /// Called after the transaction that contains `enqueue_usage_event` commits.
+    /// Called after the transaction that contains enqueue calls commits.
     /// Multiple flush calls coalesce — calling flush 10 times results in at most
     /// one sequencer wakeup.
     ///

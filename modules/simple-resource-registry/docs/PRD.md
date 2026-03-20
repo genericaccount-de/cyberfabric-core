@@ -1,5 +1,44 @@
 # PRD — Simple Resource Registry
 
+
+<!-- toc -->
+
+- [1. Overview](#1-overview)
+  - [1.1 Purpose](#11-purpose)
+  - [1.2 Background / Problem Statement](#12-background--problem-statement)
+  - [1.3 Goals (Business Outcomes)](#13-goals-business-outcomes)
+  - [1.4 Glossary](#14-glossary)
+- [2. Actors](#2-actors)
+  - [2.1 Human Actors](#21-human-actors)
+  - [2.2 System Actors](#22-system-actors)
+- [3. Operational Concept & Environment](#3-operational-concept--environment)
+- [4. Scope](#4-scope)
+  - [4.1 In Scope](#41-in-scope)
+  - [4.2 Future scope](#42-future-scope)
+  - [4.3 Out of Scope](#43-out-of-scope)
+- [5. Functional Requirements](#5-functional-requirements)
+  - [5.1 Core CRUD and Storage](#51-core-crud-and-storage)
+  - [5.2 Events and Audit](#52-events-and-audit)
+  - [5.3 Multi-Backend Storage](#53-multi-backend-storage)
+- [6. Non-Functional Requirements](#6-non-functional-requirements)
+  - [6.1 Module-Specific NFRs](#61-module-specific-nfrs)
+  - [6.2 NFR Exclusions](#62-nfr-exclusions)
+- [7. Public Library Interfaces](#7-public-library-interfaces)
+  - [7.1 Public API Surface](#71-public-api-surface)
+  - [7.2 External Integration Contracts](#72-external-integration-contracts)
+- [8. Use Cases](#8-use-cases)
+  - [Reflect External Resource Entry](#reflect-external-resource-entry)
+  - [Query Resources with OData Filtering](#query-resources-with-odata-filtering)
+  - [Store Workflow-Generated Custom Object](#store-workflow-generated-custom-object)
+- [9. Acceptance Criteria](#9-acceptance-criteria)
+- [10. Dependencies](#10-dependencies)
+- [11. Assumptions](#11-assumptions)
+- [12. Risks](#12-risks)
+- [13. Open Questions](#13-open-questions)
+- [14. Traceability](#14-traceability)
+
+<!-- /toc -->
+
 ## 1. Overview
 
 ### 1.1 Purpose

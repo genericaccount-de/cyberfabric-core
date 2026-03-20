@@ -50,6 +50,10 @@ pub struct ContextInput<'a> {
     pub vector_store_ids: &'a [String],
     /// Optional metadata filter for file search (e.g. filter by `attachment_ids`).
     pub file_search_filters: Option<FileSearchFilter>,
+    /// Search context size for `web_search` tool.
+    pub web_search_context_size: crate::domain::llm::WebSearchContextSize,
+    /// Max results for `file_search` tool (from CCM per-model config).
+    pub file_search_max_num_results: u32,
     /// Token budget for context truncation. `None` = no truncation.
     pub token_budget: Option<TokenBudget>,
 }
@@ -164,10 +168,13 @@ pub fn assemble_context(
         tools.push(LlmTool::FileSearch {
             vector_store_ids: input.vector_store_ids.to_vec(),
             filters: input.file_search_filters.clone(),
+            max_num_results: Some(input.file_search_max_num_results),
         });
     }
     if input.web_search_enabled {
-        tools.push(LlmTool::WebSearch);
+        tools.push(LlmTool::WebSearch {
+            search_context_size: input.web_search_context_size,
+        });
     }
 
     // ── Truncation ──
@@ -323,6 +330,8 @@ mod tests {
             file_search_enabled: false,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: None,
         })
         .unwrap();
@@ -345,6 +354,8 @@ mod tests {
             file_search_enabled: false,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: None,
         })
         .unwrap();
@@ -367,6 +378,8 @@ mod tests {
             file_search_enabled: true,
             vector_store_ids: &["vs-1".to_owned()],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: None,
         })
         .unwrap();
@@ -389,6 +402,8 @@ mod tests {
             file_search_enabled: true,
             vector_store_ids: &["vs-1".to_owned()],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: None,
         })
         .unwrap();
@@ -413,6 +428,8 @@ mod tests {
             file_search_enabled: false,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: None,
         })
         .unwrap();
@@ -448,6 +465,8 @@ mod tests {
             file_search_enabled: false,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: None,
         })
         .unwrap();
@@ -473,6 +492,8 @@ mod tests {
             file_search_enabled: false,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: None,
         })
         .unwrap();
@@ -495,6 +516,8 @@ mod tests {
             file_search_enabled: false,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: None,
         })
         .unwrap();
@@ -524,12 +547,25 @@ mod tests {
             file_search_enabled: true,
             vector_store_ids: &["vs-123".to_owned()],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::High,
+            file_search_max_num_results: 7,
             token_budget: None,
         })
         .unwrap();
         assert_eq!(result.tools.len(), 2);
-        assert!(matches!(&result.tools[0], LlmTool::FileSearch { .. }));
-        assert!(matches!(&result.tools[1], LlmTool::WebSearch));
+        assert!(matches!(
+            &result.tools[0],
+            LlmTool::FileSearch {
+                max_num_results: Some(7),
+                ..
+            }
+        ));
+        assert!(matches!(
+            &result.tools[1],
+            LlmTool::WebSearch {
+                search_context_size: crate::domain::llm::WebSearchContextSize::High
+            }
+        ));
 
         // file_search enabled but no vector store IDs → no file_search tool
         let result = assemble_context(&ContextInput {
@@ -543,6 +579,8 @@ mod tests {
             file_search_enabled: true,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: None,
         })
         .unwrap();
@@ -560,11 +598,18 @@ mod tests {
             file_search_enabled: false,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Medium,
+            file_search_max_num_results: 5,
             token_budget: None,
         })
         .unwrap();
         assert_eq!(result.tools.len(), 1);
-        assert!(matches!(&result.tools[0], LlmTool::WebSearch));
+        assert!(matches!(
+            &result.tools[0],
+            LlmTool::WebSearch {
+                search_context_size: crate::domain::llm::WebSearchContextSize::Medium
+            }
+        ));
     }
 
     // ── Helper: default budgets for truncation tests ──
@@ -664,6 +709,8 @@ mod tests {
             file_search_enabled: false,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: Some(test_budget(context_window, 4096)),
         })
         .unwrap();
@@ -700,6 +747,8 @@ mod tests {
             file_search_enabled: false,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: Some(test_budget(context_window, 4096)),
         })
         .unwrap();
@@ -746,6 +795,8 @@ mod tests {
             file_search_enabled: false,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: Some(test_budget(context_window, 4096)),
         })
         .unwrap();
@@ -769,6 +820,8 @@ mod tests {
             file_search_enabled: false,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: Some(test_budget(5000, 4096)),
         });
 
@@ -797,6 +850,8 @@ mod tests {
             file_search_enabled: false,
             vector_store_ids: &[],
             file_search_filters: None,
+            web_search_context_size: crate::domain::llm::WebSearchContextSize::Low,
+            file_search_max_num_results: 5,
             token_budget: None,
         })
         .unwrap();

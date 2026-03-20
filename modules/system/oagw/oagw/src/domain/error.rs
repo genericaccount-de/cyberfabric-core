@@ -59,6 +59,15 @@ pub enum DomainError {
     #[error("{detail}")]
     RequestTimeout { detail: String, instance: String },
 
+    /// A guard plugin rejected the request with a specific status and error code.
+    #[error("guard rejected: {detail}")]
+    GuardRejected {
+        status: u16,
+        error_code: String,
+        detail: String,
+        instance: String,
+    },
+
     /// The request was denied by the authorization policy.
     #[error("access forbidden: {detail}")]
     Forbidden { detail: String },
@@ -135,7 +144,7 @@ impl From<tenant_resolver_sdk::TenantResolverError> for DomainError {
                 tracing::warn!(tenant_id = %tenant_id, "tenant not found during hierarchy resolution");
                 Self::NotFound {
                     entity: "tenant",
-                    id: tenant_id,
+                    id: tenant_id.0,
                 }
             }
             TenantResolverError::Unauthorized => Self::Forbidden {

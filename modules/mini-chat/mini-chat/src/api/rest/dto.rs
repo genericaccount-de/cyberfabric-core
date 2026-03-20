@@ -161,23 +161,24 @@ impl From<ImgThumbnail> for ImgThumbnailDto {
 #[modkit_macros::api_dto(response)]
 pub struct AttachmentDetailDto {
     pub id: Uuid,
-    pub chat_id: Uuid,
     pub filename: String,
     pub content_type: String,
     pub size_bytes: i64,
-    pub storage_backend: String,
     pub status: String,
-    pub attachment_kind: String,
+    pub kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_code: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub doc_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub img_thumbnail: Option<ImgThumbnailDto>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub summary_updated_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
-    #[serde(with = "time::serde::rfc3339")]
-    pub updated_at: OffsetDateTime,
 }
 
 impl From<AttachmentModel> for AttachmentDetailDto {
@@ -195,18 +196,16 @@ impl From<AttachmentModel> for AttachmentDetailDto {
 
         Self {
             id: m.id,
-            chat_id: m.chat_id,
             filename: m.filename,
             content_type: m.content_type,
             size_bytes: m.size_bytes,
-            storage_backend: m.storage_backend,
             status: m.status.to_string(),
-            attachment_kind: m.attachment_kind.to_string(),
+            kind: m.attachment_kind.to_string(),
             error_code: m.error_code,
             doc_summary: m.doc_summary,
             img_thumbnail,
+            summary_updated_at: m.summary_updated_at,
             created_at: m.created_at,
-            updated_at: m.updated_at,
         }
     }
 }

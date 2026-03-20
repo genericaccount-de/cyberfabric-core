@@ -6,23 +6,25 @@ use crate::infra::db::entity::message::{
     Column as MsgColumn, Entity as MsgEntity, Model as MsgModel,
 };
 
-/// Cursor/sort field enum for chat pagination.
+/// Cursor/sort/filter field enum for chat pagination.
 ///
-/// P1 only supports cursor-based pagination with `updated_at DESC` + `id` tiebreaker.
-/// No user-facing $filter or $orderby is exposed.
+/// Pagination uses `updated_at DESC` + `id` tiebreaker.
+/// Filtering supports `contains(title, '...')` for chat title search.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ChatCursorField {
     UpdatedAt,
     Id,
+    Title,
 }
 
 impl FilterField for ChatCursorField {
-    const FIELDS: &'static [Self] = &[Self::UpdatedAt, Self::Id];
+    const FIELDS: &'static [Self] = &[Self::UpdatedAt, Self::Id, Self::Title];
 
     fn name(&self) -> &'static str {
         match self {
             Self::UpdatedAt => "updated_at",
             Self::Id => "id",
+            Self::Title => "title",
         }
     }
 
@@ -30,6 +32,7 @@ impl FilterField for ChatCursorField {
         match self {
             Self::UpdatedAt => FieldKind::DateTimeUtc,
             Self::Id => FieldKind::Uuid,
+            Self::Title => FieldKind::String,
         }
     }
 }
@@ -43,6 +46,7 @@ impl FieldToColumn<ChatCursorField> for ChatODataMapper {
         match field {
             ChatCursorField::UpdatedAt => Column::UpdatedAt,
             ChatCursorField::Id => Column::Id,
+            ChatCursorField::Title => Column::Title,
         }
     }
 }
@@ -56,6 +60,9 @@ impl ODataFieldMapping<ChatCursorField> for ChatODataMapper {
                 sea_orm::Value::TimeDateTimeWithTimeZone(Some(Box::new(model.updated_at)))
             }
             ChatCursorField::Id => sea_orm::Value::Uuid(Some(Box::new(model.id))),
+            ChatCursorField::Title => {
+                sea_orm::Value::String(model.title.as_ref().map(|s| Box::new(s.clone())))
+            }
         }
     }
 }

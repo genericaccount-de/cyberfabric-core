@@ -65,5 +65,14 @@ LL |     let _s = "gts.x.core.events.type.*";
    = note: Wildcards (*) are only allowed in permission strings, not in regular GTS identifiers
    = help: Use concrete type names
 
-error: aborting due to 8 previous errors
+error: GTS wildcard string in `const`/`static` `BAD_PATTERN` must have a name ending with `_WILDCARD` (DE0901)
+  --> $DIR/invalid_cases.rs:68:1
+   |
+LL | const BAD_PATTERN: &str = "gts.x.core.srr.resource.v1~*";
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: found wildcard GTS pattern `gts.x.core.srr.resource.v1~*` stored in `BAD_PATTERN`
+   = help: rename to `BAD_PATTERN_WILDCARD` or use a non-wildcard value
+
+error: aborting due to 9 previous errors
 

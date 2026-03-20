@@ -4,6 +4,9 @@
 pub mod module;
 pub use module::MiniChatModule;
 
+// === PLUGIN MODULES ===
+pub use infra::plugins::StaticMiniChatAuditPlugin;
+
 // === INTERNAL MODULES ===
 #[doc(hidden)]
 pub mod api;

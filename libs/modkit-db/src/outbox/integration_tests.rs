@@ -30,7 +30,7 @@ use super::strategy::{
     DecoupledStrategy, ProcessContext, ProcessingStrategy, TransactionalStrategy,
 };
 use super::taskward::{Directive, WorkerAction};
-use super::types::{EnqueueMessage, OutboxConfig, QueueConfig, SequencerConfig};
+use super::types::{EnqueueMessage, OutboxConfig, SequencerConfig, WorkerTuning};
 use super::workers::sequencer::Sequencer;
 use super::{Outbox, OutboxError, Partitions};
 use crate::migration_runner::run_migrations_for_testing;
@@ -1115,7 +1115,8 @@ async fn run_transactional(
     db: &Db,
     partition_id: i64,
     handler: impl TransactionalHandler + 'static,
-    config: &QueueConfig,
+    lease_duration: Duration,
+    msg_batch_size: u32,
 ) -> Option<super::strategy::ProcessResult> {
     let conn = db.sea_internal();
     let backend = conn.get_database_backend();
@@ -1130,7 +1131,12 @@ async fn run_transactional(
         partition_id,
     };
     strategy
-        .process(&ctx, config, CancellationToken::new())
+        .process(
+            &ctx,
+            lease_duration,
+            msg_batch_size,
+            CancellationToken::new(),
+        )
         .await
         .unwrap()
 }
@@ -1145,17 +1151,14 @@ async fn transactional_success_advances_cursor() {
     enqueue_and_sequence(&t, &db, "q", 0, &["a", "b", "c"]).await;
 
     let count = Arc::new(AtomicU32::new(0));
-    let config = QueueConfig {
-        msg_batch_size: 3,
-        ..Default::default()
-    };
     run_transactional(
         &db,
         pid,
         CountingTxHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        3,
     )
     .await;
 
@@ -1174,8 +1177,7 @@ async fn transactional_retry_increments_attempts() {
 
     enqueue_and_sequence(&t, &db, "q", 0, &["msg"]).await;
 
-    let config = QueueConfig::default();
-    run_transactional(&db, pid, AlwaysRetryTxHandler, &config).await;
+    run_transactional(&db, pid, AlwaysRetryTxHandler, Duration::from_secs(30), 10).await;
 
     let snap = read_processor_state(&db, pid).await;
     assert_eq!(snap.processed_seq, 0, "cursor not advanced");
@@ -1192,8 +1194,7 @@ async fn transactional_reject_creates_dead_letter_and_advances() {
 
     enqueue_and_sequence(&t, &db, "q", 0, &["poison"]).await;
 
-    let config = QueueConfig::default();
-    run_transactional(&db, pid, AlwaysRejectTxHandler, &config).await;
+    run_transactional(&db, pid, AlwaysRejectTxHandler, Duration::from_secs(30), 10).await;
 
     let snap = read_processor_state(&db, pid).await;
     assert_eq!(snap.processed_seq, 1, "cursor advanced past rejected msg");
@@ -1220,10 +1221,6 @@ async fn transactional_batch_processes_multiple_in_single_tx() {
     enqueue_and_sequence(&t, &db, "q", 0, &["a", "b", "c"]).await;
 
     let count = Arc::new(AtomicU32::new(0));
-    let config = QueueConfig {
-        msg_batch_size: 3,
-        ..Default::default()
-    };
     // CountingTxHandler counts the number of messages per call
     run_transactional(
         &db,
@@ -1231,7 +1228,8 @@ async fn transactional_batch_processes_multiple_in_single_tx() {
         CountingTxHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        3,
     )
     .await;
 
@@ -1247,7 +1245,8 @@ async fn run_decoupled(
     db: &Db,
     partition_id: i64,
     handler: impl Handler + 'static,
-    config: &QueueConfig,
+    lease_duration: Duration,
+    msg_batch_size: u32,
 ) -> Option<super::strategy::ProcessResult> {
     let conn = db.sea_internal();
     let backend = conn.get_database_backend();
@@ -1262,7 +1261,12 @@ async fn run_decoupled(
         partition_id,
     };
     strategy
-        .process(&ctx, config, CancellationToken::new())
+        .process(
+            &ctx,
+            lease_duration,
+            msg_batch_size,
+            CancellationToken::new(),
+        )
         .await
         .unwrap()
 }
@@ -1277,17 +1281,14 @@ async fn decoupled_success_advances_cursor_and_releases_lease() {
     enqueue_and_sequence(&t, &db, "q", 0, &["a", "b"]).await;
 
     let count = Arc::new(AtomicU32::new(0));
-    let config = QueueConfig {
-        msg_batch_size: 2,
-        ..Default::default()
-    };
     run_decoupled(
         &db,
         pid,
         CountingSuccessHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        2,
     )
     .await;
 
@@ -1308,12 +1309,12 @@ async fn decoupled_retry_preserves_cursor_and_releases_lease() {
 
     enqueue_and_sequence(&t, &db, "q", 0, &["msg"]).await;
 
-    let config = QueueConfig::default();
     run_decoupled(
         &db,
         pid,
         PerMessageAdapter::new(AlwaysRetryHandler),
-        &config,
+        Duration::from_secs(30),
+        10,
     )
     .await;
 
@@ -1333,12 +1334,12 @@ async fn decoupled_reject_creates_dead_letter_and_releases_lease() {
 
     enqueue_and_sequence(&t, &db, "q", 0, &["bad"]).await;
 
-    let config = QueueConfig::default();
     run_decoupled(
         &db,
         pid,
         PerMessageAdapter::new(AlwaysRejectHandler),
-        &config,
+        Duration::from_secs(30),
+        10,
     )
     .await;
 
@@ -1360,14 +1361,14 @@ async fn decoupled_empty_partition_releases_lease() {
 
     // No messages enqueued
     let count = Arc::new(AtomicU32::new(0));
-    let config = QueueConfig::default();
     let result = run_decoupled(
         &db,
         pid,
         CountingSuccessHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        10,
     )
     .await;
 
@@ -1384,8 +1385,6 @@ async fn decoupled_empty_partition_does_not_accumulate_attempts() {
     t.outbox.register_queue(&db, "q", 1).await.unwrap();
     let pid = t.outbox.all_partition_ids()[0];
 
-    let config = QueueConfig::default();
-
     // Run 5 empty lease cycles: acquire → empty → release
     for _ in 0..5 {
         let count = Arc::new(AtomicU32::new(0));
@@ -1395,7 +1394,8 @@ async fn decoupled_empty_partition_does_not_accumulate_attempts() {
             CountingSuccessHandler {
                 count: count.clone(),
             },
-            &config,
+            Duration::from_secs(30),
+            10,
         )
         .await;
         assert_eq!(count.load(Ordering::Relaxed), 0);
@@ -1422,11 +1422,7 @@ async fn decoupled_each_message_adapter_processes_individually() {
     let handler = PerMessageAdapter::new(CountingMessageHandler {
         count: count.clone(),
     });
-    let config = QueueConfig {
-        msg_batch_size: 3,
-        ..Default::default()
-    };
-    run_decoupled(&db, pid, handler, &config).await;
+    run_decoupled(&db, pid, handler, Duration::from_secs(30), 3).await;
 
     // PerMessageAdapter calls MessageHandler once per message
     assert_eq!(count.load(Ordering::Relaxed), 3);
@@ -1472,8 +1468,14 @@ async fn recovery_after_crash_sees_nonzero_attempts() {
     let handler = AttemptsRecorder {
         seen_attempts: seen.clone(),
     };
-    let config = QueueConfig::default();
-    run_decoupled(&db, pid, PerMessageAdapter::new(handler), &config).await;
+    run_decoupled(
+        &db,
+        pid,
+        PerMessageAdapter::new(handler),
+        Duration::from_secs(30),
+        10,
+    )
+    .await;
 
     {
         let recorded = seen.lock().unwrap();
@@ -1516,12 +1518,12 @@ async fn retry_does_not_double_increment_attempts() {
 
     // lease_acquire increments attempts 0→1 in DB;
     // handler returns Retry; lease_record_retry does NOT increment again
-    let config = QueueConfig::default();
     run_decoupled(
         &db,
         pid,
         PerMessageAdapter::new(AlwaysRetryHandler),
-        &config,
+        Duration::from_secs(30),
+        10,
     )
     .await;
 
@@ -1547,14 +1549,14 @@ async fn success_after_crash_resets_attempts() {
 
     // Recovery succeeds
     let count = Arc::new(AtomicU32::new(0));
-    let config = QueueConfig::default();
     run_decoupled(
         &db,
         pid,
         CountingSuccessHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        10,
     )
     .await;
 
@@ -1580,11 +1582,6 @@ async fn adaptive_batch_isolates_poison_message() {
     // Demonstrate the adaptive batch isolation mechanism step by step
     // with batch_size=1 (the degraded size):
 
-    let config = QueueConfig {
-        msg_batch_size: 1,
-        ..Default::default()
-    };
-
     // Process msg 1 (ok1) — success
     let r = run_decoupled(
         &db,
@@ -1592,7 +1589,8 @@ async fn adaptive_batch_isolates_poison_message() {
         PerMessageAdapter::new(PoisonMessageHandler {
             poison_seqs: vec![2],
         }),
-        &config,
+        Duration::from_secs(30),
+        1,
     )
     .await;
     assert!(matches!(r.unwrap().handler_result, HandlerResult::Success));
@@ -1604,7 +1602,8 @@ async fn adaptive_batch_isolates_poison_message() {
         PerMessageAdapter::new(PoisonMessageHandler {
             poison_seqs: vec![2],
         }),
-        &config,
+        Duration::from_secs(30),
+        1,
     )
     .await;
     assert!(matches!(
@@ -1619,7 +1618,8 @@ async fn adaptive_batch_isolates_poison_message() {
         PerMessageAdapter::new(PoisonMessageHandler {
             poison_seqs: vec![2],
         }),
-        &config,
+        Duration::from_secs(30),
+        1,
     )
     .await;
     assert!(matches!(r.unwrap().handler_result, HandlerResult::Success));
@@ -1631,7 +1631,8 @@ async fn adaptive_batch_isolates_poison_message() {
         PerMessageAdapter::new(PoisonMessageHandler {
             poison_seqs: vec![2],
         }),
-        &config,
+        Duration::from_secs(30),
+        1,
     )
     .await;
     assert!(matches!(r.unwrap().handler_result, HandlerResult::Success));
@@ -1738,17 +1739,14 @@ async fn vacuum_deletes_processed_outgoing_and_body_rows() {
 
     // Process all 3
     let count = Arc::new(AtomicU32::new(0));
-    let config = QueueConfig {
-        msg_batch_size: 3,
-        ..Default::default()
-    };
     run_decoupled(
         &db,
         pid,
         CountingSuccessHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        3,
     )
     .await;
 
@@ -1790,19 +1788,16 @@ async fn vacuum_preserves_unprocessed_rows() {
 
     enqueue_and_sequence(&t, &db, "q", 0, &["a", "b", "c", "d", "e"]).await;
 
-    // Process only 3 of 5 (msg_batch_size=3)
+    // Process only 3 of 5 (batch_size=3)
     let count = Arc::new(AtomicU32::new(0));
-    let config = QueueConfig {
-        msg_batch_size: 3,
-        ..Default::default()
-    };
     run_decoupled(
         &db,
         pid,
         CountingSuccessHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        3,
     )
     .await;
 
@@ -1868,17 +1863,14 @@ async fn vacuum_counter_bumped_on_processed_seq_advance() {
 
     // Process batch of 2 — counter should bump once (one ack).
     let count = Arc::new(AtomicU32::new(0));
-    let config = QueueConfig {
-        msg_batch_size: 2,
-        ..Default::default()
-    };
     run_decoupled(
         &db,
         pid,
         CountingSuccessHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        2,
     )
     .await;
 
@@ -1891,7 +1883,8 @@ async fn vacuum_counter_bumped_on_processed_seq_advance() {
         CountingSuccessHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        2,
     )
     .await;
 
@@ -1909,17 +1902,14 @@ async fn vacuum_counter_preserves_concurrent_bumps() {
 
     // Process all 3 — counter = 1 (one ack of batch=3).
     let count = Arc::new(AtomicU32::new(0));
-    let config = QueueConfig {
-        msg_batch_size: 3,
-        ..Default::default()
-    };
     run_decoupled(
         &db,
         pid,
         CountingSuccessHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        3,
     )
     .await;
 
@@ -1947,14 +1937,14 @@ async fn vacuum_stale_counter_reset() {
     // Create and process a message so processed_seq > 0.
     enqueue_and_sequence(&t, &db, "q", 0, &["a"]).await;
     let count = Arc::new(AtomicU32::new(0));
-    let config = QueueConfig::default();
     run_decoupled(
         &db,
         pid,
         CountingSuccessHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        10,
     )
     .await;
 
@@ -2011,15 +2001,12 @@ async fn create_dead_letters(
     enqueue_and_sequence(t, db, queue, partition, payloads).await;
     let ids = t.outbox.all_partition_ids();
     let pid = ids[partition as usize];
-    let config = QueueConfig {
-        msg_batch_size: u32::try_from(payloads.len()).unwrap(),
-        ..Default::default()
-    };
     run_decoupled(
         db,
         pid,
         PerMessageAdapter::new(AlwaysRejectHandler),
-        &config,
+        Duration::from_secs(30),
+        u32::try_from(payloads.len()).unwrap(),
     )
     .await;
 }
@@ -2257,7 +2244,12 @@ async fn builder_start_stop_clean() {
         count: count.clone(),
     };
     let handle = Outbox::builder(db)
-        .poll_interval(Duration::from_millis(50))
+        .processor_tuning(
+            WorkerTuning::processor_default().idle_interval(Duration::from_millis(50)),
+        )
+        .sequencer_tuning(
+            WorkerTuning::sequencer_default().idle_interval(Duration::from_millis(50)),
+        )
         .queue("orders", Partitions::of(1))
         .decoupled(handler)
         .start()
@@ -2284,7 +2276,12 @@ async fn builder_multiple_queues() {
     let count_b = Arc::new(AtomicU32::new(0));
 
     let handle = Outbox::builder(db)
-        .poll_interval(Duration::from_millis(50))
+        .processor_tuning(
+            WorkerTuning::processor_default().idle_interval(Duration::from_millis(50)),
+        )
+        .sequencer_tuning(
+            WorkerTuning::sequencer_default().idle_interval(Duration::from_millis(50)),
+        )
         .queue("a", Partitions::of(1))
         .decoupled(CountingMessageHandler {
             count: count_a.clone(),
@@ -2344,17 +2341,14 @@ async fn e2e_happy_path_enqueue_through_reap() {
     enqueue_and_sequence(&t, &db, "q", 0, &["a", "b", "c"]).await;
 
     let count = Arc::new(AtomicU32::new(0));
-    let config = QueueConfig {
-        msg_batch_size: 3,
-        ..Default::default()
-    };
     run_decoupled(
         &db,
         pid,
         CountingSuccessHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        3,
     )
     .await;
     run_vacuum(&db, pid).await;
@@ -2378,14 +2372,13 @@ async fn e2e_retry_then_recovery() {
 
     enqueue_and_sequence(&t, &db, "q", 0, &["msg"]).await;
 
-    let config = QueueConfig::default();
-
     // Retry twice
     run_decoupled(
         &db,
         pid,
         PerMessageAdapter::new(AlwaysRetryHandler),
-        &config,
+        Duration::from_secs(30),
+        10,
     )
     .await;
     expire_lease(&db, pid).await;
@@ -2393,7 +2386,8 @@ async fn e2e_retry_then_recovery() {
         &db,
         pid,
         PerMessageAdapter::new(AlwaysRetryHandler),
-        &config,
+        Duration::from_secs(30),
+        10,
     )
     .await;
     expire_lease(&db, pid).await;
@@ -2410,7 +2404,8 @@ async fn e2e_retry_then_recovery() {
         CountingSuccessHandler {
             count: count.clone(),
         },
-        &config,
+        Duration::from_secs(30),
+        10,
     )
     .await;
 
@@ -2471,8 +2466,14 @@ async fn e2e_crash_then_recovery() {
     let handler = AttemptsRecorder {
         seen_attempts: seen.clone(),
     };
-    let config = QueueConfig::default();
-    run_decoupled(&db, pid, PerMessageAdapter::new(handler), &config).await;
+    run_decoupled(
+        &db,
+        pid,
+        PerMessageAdapter::new(handler),
+        Duration::from_secs(30),
+        10,
+    )
+    .await;
 
     {
         let recorded = seen.lock().unwrap();
@@ -2573,11 +2574,7 @@ async fn tx_partial_reject_processed_count_in_result() {
         poison_seq: 3, // seqs are 1-based; poison at seq=3
         reject: true,
     });
-    let config = QueueConfig {
-        msg_batch_size: 5,
-        ..Default::default()
-    };
-    let result = run_transactional(&db, pid, handler, &config).await;
+    let result = run_transactional(&db, pid, handler, Duration::from_secs(30), 5).await;
 
     let pr = result.expect("should have a result");
     assert!(matches!(pr.handler_result, HandlerResult::Reject { .. }));
@@ -2608,11 +2605,7 @@ async fn tx_partial_retry_rolls_back_all() {
         poison_seq: 2,
         reject: false, // retry
     });
-    let config = QueueConfig {
-        msg_batch_size: 3,
-        ..Default::default()
-    };
-    let result = run_transactional(&db, pid, handler, &config).await;
+    let result = run_transactional(&db, pid, handler, Duration::from_secs(30), 3).await;
 
     let pr = result.expect("should have a result");
     assert!(matches!(pr.handler_result, HandlerResult::Retry { .. }));
@@ -2642,11 +2635,7 @@ async fn tx_reject_at_first_msg_processed_count_zero() {
         poison_seq: 1, // first message
         reject: true,
     });
-    let config = QueueConfig {
-        msg_batch_size: 2,
-        ..Default::default()
-    };
-    let result = run_transactional(&db, pid, handler, &config).await;
+    let result = run_transactional(&db, pid, handler, Duration::from_secs(30), 2).await;
 
     let pr = result.expect("should have a result");
     assert_eq!(pr.processed_count, Some(0));
@@ -2661,11 +2650,8 @@ async fn tx_batch_handler_reject_deadletters_all() {
 
     enqueue_and_sequence(&t, &db, "q", 0, &["a", "b", "c"]).await;
 
-    let config = QueueConfig {
-        msg_batch_size: 3,
-        ..Default::default()
-    };
-    let result = run_transactional(&db, pid, AlwaysRejectTxHandler, &config).await;
+    let result =
+        run_transactional(&db, pid, AlwaysRejectTxHandler, Duration::from_secs(30), 3).await;
 
     let pr = result.expect("should have a result");
     assert_eq!(pr.processed_count, None, "batch handler returns None");
@@ -2691,11 +2677,7 @@ async fn decoupled_partial_reject_deadletters_only_remaining() {
         poison_seq: 3,
         reject: true,
     });
-    let config = QueueConfig {
-        msg_batch_size: 5,
-        ..Default::default()
-    };
-    let result = run_decoupled(&db, pid, handler, &config).await;
+    let result = run_decoupled(&db, pid, handler, Duration::from_secs(30), 5).await;
 
     let pr = result.expect("should have a result");
     assert!(matches!(pr.handler_result, HandlerResult::Reject { .. }));
@@ -2727,11 +2709,7 @@ async fn decoupled_reject_at_first_deadletters_all() {
         poison_seq: 1, // first message
         reject: true,
     });
-    let config = QueueConfig {
-        msg_batch_size: 3,
-        ..Default::default()
-    };
-    let result = run_decoupled(&db, pid, handler, &config).await;
+    let result = run_decoupled(&db, pid, handler, Duration::from_secs(30), 3).await;
 
     let pr = result.expect("should have a result");
     assert_eq!(pr.processed_count, Some(0));
@@ -2756,11 +2734,7 @@ async fn decoupled_retry_does_not_advance_cursor() {
         poison_seq: 2,
         reject: false,
     });
-    let config = QueueConfig {
-        msg_batch_size: 3,
-        ..Default::default()
-    };
-    let result = run_decoupled(&db, pid, handler, &config).await;
+    let result = run_decoupled(&db, pid, handler, Duration::from_secs(30), 3).await;
 
     let pr = result.expect("should have a result");
     assert!(matches!(pr.handler_result, HandlerResult::Retry { .. }));
@@ -2782,11 +2756,7 @@ async fn decoupled_batch_handler_reject_deadletters_all() {
 
     enqueue_and_sequence(&t, &db, "q", 0, &["a", "b", "c"]).await;
 
-    let config = QueueConfig {
-        msg_batch_size: 3,
-        ..Default::default()
-    };
-    let result = run_decoupled(&db, pid, BatchRejectHandler, &config).await;
+    let result = run_decoupled(&db, pid, BatchRejectHandler, Duration::from_secs(30), 3).await;
 
     let pr = result.expect("should have a result");
     assert_eq!(pr.processed_count, None, "batch handler returns None");
@@ -2800,34 +2770,35 @@ async fn decoupled_batch_handler_reject_deadletters_all() {
 
 #[tokio::test]
 async fn degradation_with_processed_count() {
-    use super::workers::processor::PartitionMode;
+    use super::workers::processor::{PartitionMode, PartitionModeState};
 
     // Simulate: batch_size=8, poison at position 3 (0-indexed)
     // → processed_count = 3, degrade to max(3, 1) = 3
-    let mut mode = PartitionMode::Normal;
+    let mut mode = PartitionMode::new();
     mode.transition(
         &HandlerResult::Reject {
             reason: "poison".into(),
         },
         8,
         Some(3),
+        1, // degrade immediately
     );
     assert_eq!(mode.effective_batch_size(8), 3);
 
     // Next success: 3 → 6
-    mode.transition(&HandlerResult::Success, 8, None);
+    mode.transition(&HandlerResult::Success, 8, None, 1);
     assert_eq!(mode.effective_batch_size(8), 6);
 
     // Next success: 6 → Normal(8)
-    mode.transition(&HandlerResult::Success, 8, None);
-    assert!(matches!(mode, PartitionMode::Normal));
+    mode.transition(&HandlerResult::Success, 8, None, 1);
+    assert!(matches!(mode.state, PartitionModeState::Normal));
 }
 
 #[tokio::test]
 async fn degradation_batch_handler_falls_back_to_one() {
     use super::workers::processor::PartitionMode;
 
-    let mut mode = PartitionMode::Normal;
+    let mut mode = PartitionMode::new();
     // Batch handler: None processed_count → degrade to 1
     mode.transition(
         &HandlerResult::Reject {
@@ -2835,6 +2806,7 @@ async fn degradation_batch_handler_falls_back_to_one() {
         },
         8,
         None,
+        1, // degrade immediately
     );
     assert_eq!(mode.effective_batch_size(8), 1);
 }
@@ -2843,7 +2815,7 @@ async fn degradation_batch_handler_falls_back_to_one() {
 async fn degradation_processed_count_zero_degrades_to_one() {
     use super::workers::processor::PartitionMode;
 
-    let mut mode = PartitionMode::Normal;
+    let mut mode = PartitionMode::new();
     // processed_count=0 → max(0, 1) = 1
     mode.transition(
         &HandlerResult::Retry {
@@ -2851,6 +2823,7 @@ async fn degradation_processed_count_zero_degrades_to_one() {
         },
         8,
         Some(0),
+        1, // degrade immediately
     );
     assert_eq!(mode.effective_batch_size(8), 1);
 }
@@ -2875,8 +2848,7 @@ async fn batch_size_one_partial_failure_is_noop() {
         poison_seq: 1,
         reject: true,
     });
-    let config = QueueConfig::default(); // batch_size=1
-    let result = run_decoupled(&db, pid, handler, &config).await;
+    let result = run_decoupled(&db, pid, handler, Duration::from_secs(30), 1).await;
 
     let pr = result.expect("should have a result");
     assert_eq!(pr.processed_count, Some(0));
@@ -2891,10 +2863,10 @@ async fn processed_count_exceeds_batch_is_clamped() {
 
     // Even if processed_count somehow exceeds batch count, clamping prevents
     // invalid state. The processor clamps pc to count before passing to transition.
-    let mut mode = PartitionMode::Normal;
+    let mut mode = PartitionMode::new();
     // Simulated: count=3, processed_count=5 → clamped to 3 by processor
     let clamped = Some(3u32);
-    mode.transition(&HandlerResult::Reject { reason: "x".into() }, 8, clamped);
+    mode.transition(&HandlerResult::Reject { reason: "x".into() }, 8, clamped, 1);
     assert_eq!(mode.effective_batch_size(8), 3);
 }
 
@@ -3313,7 +3285,6 @@ async fn processor_semaphore_limits_concurrency() {
         BulkheadConfig {
             semaphore: ConcurrencyLimit::Fixed(Arc::clone(&sem)),
             backoff: BackoffConfig::new(Duration::from_millis(100), Duration::from_secs(30), 2.0),
-            steady_pace: Duration::ZERO,
         },
     );
 
@@ -3393,8 +3364,8 @@ async fn vacuum_concurrent_workers_safe() {
 
     // Run two vacuum workers sequentially (SQLite single connection)
     let cancel = CancellationToken::new();
-    let mut vac1 = VacuumTask::new(db.clone(), Duration::from_secs(3600));
-    let mut vac2 = VacuumTask::new(db.clone(), Duration::from_secs(3600));
+    let mut vac1 = VacuumTask::new(db.clone(), 10_000);
+    let mut vac2 = VacuumTask::new(db.clone(), 10_000);
 
     vac1.execute(&cancel).await.unwrap();
     vac2.execute(&cancel).await.unwrap();
@@ -3428,7 +3399,6 @@ async fn priority_bulkhead_prefers_shared_when_available() {
                 shared: Arc::clone(&shared),
             },
             backoff: BackoffConfig::new(Duration::from_millis(100), Duration::from_secs(30), 2.0),
-            steady_pace: Duration::ZERO,
         },
     );
 
@@ -3464,7 +3434,6 @@ async fn priority_bulkhead_falls_back_to_guaranteed_when_shared_exhausted() {
                 shared: Arc::clone(&shared),
             },
             backoff: BackoffConfig::new(Duration::from_millis(100), Duration::from_secs(30), 2.0),
-            steady_pace: Duration::ZERO,
         },
     );
 
@@ -3582,11 +3551,11 @@ async fn pipeline_single_enqueue_one_delivery() {
     };
 
     let handle = Outbox::builder(db.clone())
-        .poll_interval(Duration::from_secs(60))
+        .processor_tuning(WorkerTuning::processor_default().idle_interval(Duration::from_secs(60)))
+        .sequencer_tuning(WorkerTuning::sequencer_default().idle_interval(Duration::from_secs(60)))
         .processors(1)
         .maintenance(1, 1)
         .queue("test-q", Partitions::of(1))
-        .msg_batch_size(10)
         .batch_decoupled(handler)
         .start()
         .await
@@ -3627,12 +3596,19 @@ async fn pipeline_single_enqueue_one_delivery() {
             .ok();
     }
 
-    // Brief window for any spurious duplicate deliveries
+    // Verify no duplicate delivery arrives. Wait 200ms and check the counter
+    // hasn't incremented beyond 1. We check the counter directly instead of
+    // notify.notified() because a stale permit from the first delivery's
+    // notify_one() would cause notified().await to resolve immediately.
+    let baseline = counter.load(Ordering::Relaxed);
     tokio::time::sleep(Duration::from_millis(200)).await;
-
     assert_eq!(
         counter.load(Ordering::Relaxed),
-        1,
+        baseline,
+        "no duplicate delivery should occur (counter changed during wait)"
+    );
+    assert_eq!(
+        baseline, 1,
         "single enqueue must produce exactly one delivery"
     );
 
@@ -3751,7 +3727,8 @@ async fn builder_no_queues_starts_but_enqueue_fails() {
     let db = setup_db("ch21_no_queues").await;
 
     let handle = Outbox::builder(db.clone())
-        .poll_interval(Duration::from_secs(60))
+        .processor_tuning(WorkerTuning::processor_default().idle_interval(Duration::from_secs(60)))
+        .sequencer_tuning(WorkerTuning::sequencer_default().idle_interval(Duration::from_secs(60)))
         .maintenance(1, 1)
         .start()
         .await
@@ -3771,3 +3748,125 @@ async fn builder_no_queues_starts_but_enqueue_fails() {
 // `poker_discovers_pending_from_incoming_table` and
 // `startup_reconciliation_finds_preexisting_incoming`.
 // Direct reconcile_dirty call hangs on SQLite single-connection pool.
+
+// ======================================================================
+// Chapter 22: Bug Reproduction Tests
+// ======================================================================
+
+// -- Bug 1: batch_transactional() forces batch_size=1 --
+//
+// TransactionalProcessorFactory::spawn() unconditionally sets
+// ctx.tuning.batch_size = 1 (builder.rs:214). This means
+// batch_transactional() handlers never see more than 1 message per call,
+// even though they are batch handlers and the user configured batch_size > 1.
+
+/// Batch transactional handler that records the max batch size it receives.
+struct MaxBatchSizeHandler {
+    max_batch_seen: Arc<AtomicU32>,
+    total_processed: Arc<AtomicUsize>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl TransactionalHandler for MaxBatchSizeHandler {
+    async fn handle(
+        &self,
+        _txn: &dyn sea_orm::ConnectionTrait,
+        msgs: &[OutboxMessage],
+        _cancel: CancellationToken,
+    ) -> HandlerResult {
+        #[allow(clippy::cast_possible_truncation)]
+        let batch_len = msgs.len() as u32;
+        self.max_batch_seen.fetch_max(batch_len, Ordering::Relaxed);
+        self.total_processed
+            .fetch_add(msgs.len(), Ordering::Relaxed);
+        self.notify.notify_one();
+        HandlerResult::Success
+    }
+}
+
+/// `batch_transactional()` should respect the configured `batch_size`, not force it to 1.
+///
+/// Regression test: `TransactionalProcessorFactory::spawn()` must not
+/// unconditionally override `batch_size` to 1.
+#[tokio::test]
+async fn batch_transactional_respects_configured_batch_size() {
+    let db = setup_db("ch22_batch_txn_batch_size").await;
+
+    let max_batch_seen = Arc::new(AtomicU32::new(0));
+    let total_processed = Arc::new(AtomicUsize::new(0));
+    let notify = Arc::new(tokio::sync::Notify::new());
+
+    let handler = MaxBatchSizeHandler {
+        max_batch_seen: Arc::clone(&max_batch_seen),
+        total_processed: Arc::clone(&total_processed),
+        notify: Arc::clone(&notify),
+    };
+
+    // Configure processor tuning with batch_size=5
+    let handle = Outbox::builder(db.clone())
+        .processor_tuning(
+            WorkerTuning::processor_default()
+                .batch_size(5)
+                .idle_interval(Duration::from_secs(60)),
+        )
+        .sequencer_tuning(WorkerTuning::sequencer_default().idle_interval(Duration::from_secs(60)))
+        .processors(1)
+        .maintenance(1, 1)
+        .queue("batch-q", Partitions::of(1))
+        .batch_transactional(handler)
+        .start()
+        .await
+        .unwrap();
+
+    let outbox = handle.outbox();
+
+    // Enqueue 5 messages to the same partition in one transaction
+    let (db, result) = outbox
+        .transaction(db, |tx| {
+            let o = Arc::clone(outbox);
+            Box::pin(async move {
+                for i in 0..5u8 {
+                    o.enqueue(tx, "batch-q", 0, vec![i], "test/msg")
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{e}"))?;
+                }
+                Ok(())
+            })
+        })
+        .await;
+    result.unwrap();
+
+    // Wait for all 5 messages to be consumed
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if total_processed.load(Ordering::Acquire) >= 5 {
+            break;
+        }
+        let remaining = deadline
+            .checked_duration_since(tokio::time::Instant::now())
+            .unwrap_or(Duration::ZERO);
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for consumption (processed: {})",
+            total_processed.load(Ordering::Relaxed)
+        );
+        tokio::time::timeout(remaining, notify.notified())
+            .await
+            .ok();
+    }
+
+    // The handler should have seen at least one batch with >1 message.
+    // With batch_size=5 and 5 messages on the same partition, the handler
+    // should ideally receive all 5 in one call.
+    // BUG: Today the max is always 1 because the factory forces batch_size=1.
+    let max = max_batch_seen.load(Ordering::Relaxed);
+    assert!(
+        max > 1,
+        "batch_transactional handler should receive batches > 1, but max batch size seen was {max}. \
+         This proves TransactionalProcessorFactory forces batch_size=1 even for batch handlers."
+    );
+
+    drop(db);
+    handle.stop().await;
+}

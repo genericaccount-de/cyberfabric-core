@@ -4,6 +4,23 @@ date: 2026-02-24
 ---
 # ADR-0002: DB-Level Security Filtering for Resource Access Control
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Application-level ACL checks (fetch then check)](#application-level-acl-checks-fetch-then-check)
+  - [DB-level query filtering (inject predicates)](#db-level-query-filtering-inject-predicates)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-srr-adr-db-security-filtering`
 
 ## Context and Problem Statement

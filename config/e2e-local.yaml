@@ -260,45 +260,58 @@ modules:
       proxy_timeout_secs: 2
       allow_http_upstream: true # Only for testing - do not enable in production without proper security controls
 
-# OpenTelemetry tracing configuration
-tracing:
-  enabled: false
-  service_name: "hyperspot-api"
+# OpenTelemetry configuration (resource identity, tracing, metrics)
+opentelemetry:
+  # Shared resource identity (attached to all traces and metrics)
+  resource:
+    service_name: "hyperspot-api"
+    attributes:
+      service.version: "1.3.7"
+      deployment.environment: "dev"
+      service.namespace: "hyperspot"
 
-  # OTLP exporter configuration
+  # Default exporter shared by tracing and metrics.
+  # Per-signal `exporter` fields override this when present.
   exporter:
     kind: "otlp_grpc"  # or "otlp_http"
-    endpoint: "http://127.0.0.1:14317"  # Jaeger OTLP gRPC endpoint
-    # For HTTP: endpoint: "http://127.0.0.1:4318/v1/traces"
+    endpoint: "http://127.0.0.1:4317"
     headers:
       # Add any required headers, e.g., for authentication
       # authorization: "Bearer your-token"
       uptrace-dsn: "http://project1_secret@localhost:14318?grpc=14317"
     timeout_ms: 5000
 
-  # Sampling configuration
-  sampler:
-    parent_based_ratio: # parent_based_always_on | parent_based_ratio | always_on | always_off
-      ratio: 1.0  # Sample 20% of traces (only used with ratio strategies)
+  # Tracing configuration
+  tracing:
+    enabled: false
 
-  # Propagation configuration
-  propagation:
-    w3c_trace_context: true  # Enable W3C Trace Context propagation
+    # Per-signal exporter override (fully replaces the shared exporter)
+    exporter:
+      kind: "otlp_grpc"
+      endpoint: "http://127.0.0.1:14317"  # Jaeger OTLP gRPC endpoint
 
-  # Resource attributes (added to all spans)
-  resource:
-    service.version: "1.3.7"
-    deployment.environment: "dev"
-    service.namespace: "hyperspot"
+    # Sampling configuration
+    sampler:
+      parent_based_ratio: # parent_based_always_on | parent_based_ratio | always_on | always_off
+        ratio: 1.0  # Sample 100% of traces
 
-  # HTTP-specific options
-  http:
-    inject_request_id_header: "x-request-id"
-    record_headers: [ "user-agent", "x-forwarded-for", "authorization" ]
+    # Propagation configuration
+    propagation:
+      w3c_trace_context: true  # Enable W3C Trace Context propagation
 
-  # Log correlation (future feature)
-  logs_correlation:
-    inject_trace_ids_into_logs: true
+    # HTTP-specific options
+    http:
+      inject_request_id_header: "x-request-id"
+      # WARNING: "authorization" sends bearer tokens to the trace collector — dev/test only
+      record_headers: [ "user-agent", "x-forwarded-for", "authorization" ]
+
+    # Log correlation (future feature)
+    logs_correlation:
+      inject_trace_ids_into_logs: true
+
+  # Metrics configuration
+  metrics:
+    enabled: false
 
 # Example configurations for different database scenarios:
 #

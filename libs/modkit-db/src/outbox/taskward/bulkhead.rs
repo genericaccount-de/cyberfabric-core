@@ -35,7 +35,7 @@ pub struct BackoffConfig {
     /// Growth factor per consecutive failure (e.g. 2.0 for doubling).
     pub multiplier: f64,
     /// Jitter factor (0.0–1.0). Scales each interval by a deterministic
-    /// factor in `[1.0 - jitter, 1.0 + jitter]`. Default: 0.1 (±10%).
+    /// factor in `[1.0 - jitter, 1.0 + jitter]`. Default: 0.3 (±30%).
     pub jitter: f64,
 }
 
@@ -59,7 +59,7 @@ impl BackoffConfig {
             initial,
             max,
             multiplier,
-            jitter: 0.1,
+            jitter: 0.3,
         }
     }
 }
@@ -70,7 +70,7 @@ impl Default for BackoffConfig {
             initial: Duration::from_millis(100),
             max: Duration::from_secs(30),
             multiplier: 2.0,
-            jitter: 0.1,
+            jitter: 0.3,
         }
     }
 }
@@ -81,26 +81,19 @@ pub struct BulkheadConfig {
     pub semaphore: ConcurrencyLimit,
     /// Backoff strategy applied on action errors.
     pub backoff: BackoffConfig,
-    /// Steady-state pace between executions, even when healthy.
-    /// Prevents tight-loop spinning when the worker always returns `Proceed`.
-    /// Default: `Duration::ZERO` (no pacing).
-    pub steady_pace: Duration,
 }
 
 /// Fused concurrency gate + error-driven backoff.
 ///
 /// The worker loop calls [`acquire`] before every `execute()` and
 /// [`escalate`]/[`reset`] after, based on the action result.
-/// [`steady_pace`] returns the current execution floor that the worker
-/// applies via `max(directive.interval, floor)`.
+/// [`min_interval`] returns the current error-backoff floor.
 pub struct Bulkhead {
     name: String,
     semaphore: ConcurrencyLimit,
     backoff: BackoffConfig,
     consecutive_failures: u32,
     current_interval: Duration,
-    /// Hard floor — `steady_pace()` never drops below this, even after `reset()`.
-    steady_pace: Duration,
 }
 
 impl Bulkhead {
@@ -112,7 +105,6 @@ impl Bulkhead {
             backoff: config.backoff,
             consecutive_failures: 0,
             current_interval: Duration::ZERO,
-            steady_pace: config.steady_pace,
         }
     }
 
@@ -135,11 +127,11 @@ impl Bulkhead {
         self.current_interval = Duration::ZERO;
     }
 
-    /// Current execution pace. Never drops below the configured `steady_pace`,
-    /// even when healthy (after `reset()`). Error backoff escalates above this.
+    /// Current error-backoff floor. Returns `Duration::ZERO` when healthy
+    /// (after `reset()`), escalates on consecutive failures.
     #[must_use]
-    pub fn steady_pace(&self) -> Duration {
-        self.current_interval.max(self.steady_pace)
+    pub fn min_interval(&self) -> Duration {
+        self.current_interval
     }
 
     /// Current consecutive failure count.
@@ -178,6 +170,10 @@ impl Bulkhead {
                 if cancel.is_cancelled() {
                     return None;
                 }
+                // biased: prefer shared permit first. This implements priority
+                // preemption — Tiered workers (sequencers) steal shared permits
+                // from Fixed workers (vacuum) when both compete. Vacuum only
+                // runs when sequencers are idle or using their guaranteed permits.
                 tokio::select! {
                     biased;
                     () = cancel.cancelled() => None,
@@ -224,7 +220,6 @@ impl Default for Bulkhead {
             },
             consecutive_failures: 0,
             current_interval: Duration::ZERO,
-            steady_pace: Duration::ZERO,
         }
     }
 }
@@ -242,7 +237,6 @@ mod tests {
                 multiplier,
                 jitter: 0.0,
             },
-            steady_pace: Duration::ZERO,
         }
     }
 
@@ -254,7 +248,7 @@ mod tests {
         assert_eq!(cfg.initial, Duration::from_secs(1));
         assert_eq!(cfg.max, Duration::from_secs(60));
         assert!((cfg.multiplier - 2.0).abs() < f64::EPSILON);
-        assert!((cfg.jitter - 0.1).abs() < f64::EPSILON);
+        assert!((cfg.jitter - 0.3).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -263,7 +257,7 @@ mod tests {
         assert_eq!(cfg.initial, Duration::from_millis(100));
         assert_eq!(cfg.max, Duration::from_secs(30));
         assert!((cfg.multiplier - 2.0).abs() < f64::EPSILON);
-        assert!((cfg.jitter - 0.1).abs() < f64::EPSILON);
+        assert!((cfg.jitter - 0.3).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -299,7 +293,7 @@ mod tests {
         );
         bh.escalate();
         assert_eq!(bh.consecutive_failures(), 1);
-        assert_eq!(bh.steady_pace(), Duration::from_secs(1));
+        assert_eq!(bh.min_interval(), Duration::from_secs(1));
     }
 
     #[test]
@@ -311,7 +305,7 @@ mod tests {
         let expected = [1, 2, 4, 8];
         for &exp in &expected {
             bh.escalate();
-            assert_eq!(bh.steady_pace(), Duration::from_secs(exp));
+            assert_eq!(bh.min_interval(), Duration::from_secs(exp));
         }
     }
 
@@ -324,7 +318,7 @@ mod tests {
         for _ in 0..10 {
             bh.escalate();
         }
-        assert_eq!(bh.steady_pace(), Duration::from_secs(30));
+        assert_eq!(bh.min_interval(), Duration::from_secs(30));
     }
 
     #[test]
@@ -335,7 +329,7 @@ mod tests {
         );
         for _ in 0..3 {
             bh.escalate();
-            assert_eq!(bh.steady_pace(), Duration::from_secs(5));
+            assert_eq!(bh.min_interval(), Duration::from_secs(5));
         }
     }
 
@@ -352,7 +346,7 @@ mod tests {
         }
         bh.reset();
         assert_eq!(bh.consecutive_failures(), 0);
-        assert_eq!(bh.steady_pace(), Duration::ZERO);
+        assert_eq!(bh.min_interval(), Duration::ZERO);
     }
 
     #[test]
@@ -360,13 +354,13 @@ mod tests {
         let mut bh = Bulkhead::default();
         bh.reset();
         assert_eq!(bh.consecutive_failures(), 0);
-        assert_eq!(bh.steady_pace(), Duration::ZERO);
+        assert_eq!(bh.min_interval(), Duration::ZERO);
     }
 
     #[test]
     fn default_bulkhead() {
         let bh = Bulkhead::default();
-        assert_eq!(bh.steady_pace(), Duration::ZERO);
+        assert_eq!(bh.min_interval(), Duration::ZERO);
         assert!(matches!(bh.semaphore, ConcurrencyLimit::Unlimited));
     }
 
@@ -414,11 +408,10 @@ mod tests {
                 multiplier: 1.0,
                 jitter: 0.1,
             },
-            steady_pace: Duration::ZERO,
         };
         let mut bh = Bulkhead::new("test-worker", config);
         bh.escalate();
-        let interval = bh.steady_pace();
+        let interval = bh.min_interval();
         // ±10% of 10s = [9s, 11s]
         assert!(
             interval >= Duration::from_secs(9) && interval <= Duration::from_secs(11),
@@ -433,9 +426,9 @@ mod tests {
             test_config(Duration::from_secs(1), Duration::from_secs(60), 2.0),
         );
         bh.escalate();
-        assert_eq!(bh.steady_pace(), Duration::from_secs(1));
+        assert_eq!(bh.min_interval(), Duration::from_secs(1));
         bh.escalate();
-        assert_eq!(bh.steady_pace(), Duration::from_secs(2));
+        assert_eq!(bh.min_interval(), Duration::from_secs(2));
     }
 
     #[test]
@@ -448,16 +441,15 @@ mod tests {
                 multiplier: 1.0,
                 jitter: 0.2,
             },
-            steady_pace: Duration::ZERO,
         };
         let mut bh = Bulkhead::new("test-worker", config);
         // Even with +20% jitter on 28s = 33.6s, it should be capped at 30s
         for _ in 0..10 {
             bh.escalate();
             assert!(
-                bh.steady_pace() <= Duration::from_secs(30),
+                bh.min_interval() <= Duration::from_secs(30),
                 "interval {:?} should not exceed max 30s",
-                bh.steady_pace()
+                bh.min_interval()
             );
             bh.reset();
         }
@@ -478,7 +470,6 @@ mod tests {
                     multiplier: 1.0,
                     jitter: 0.0,
                 },
-                steady_pace: Duration::ZERO,
             },
         );
         let cancel = CancellationToken::new();
@@ -498,7 +489,6 @@ mod tests {
                     multiplier: 1.0,
                     jitter: 0.0,
                 },
-                steady_pace: Duration::ZERO,
             },
         );
         let cancel = CancellationToken::new();
@@ -523,7 +513,6 @@ mod tests {
                     multiplier: 1.0,
                     jitter: 0.0,
                 },
-                steady_pace: Duration::ZERO,
             },
         );
         let cancel = CancellationToken::new();
@@ -545,7 +534,6 @@ mod tests {
                     multiplier: 1.0,
                     jitter: 0.0,
                 },
-                steady_pace: Duration::ZERO,
             },
         );
         let cancel = CancellationToken::new();
@@ -572,7 +560,6 @@ mod tests {
                     multiplier: 1.0,
                     jitter: 0.0,
                 },
-                steady_pace: Duration::ZERO,
             },
         )
     }
@@ -615,7 +602,7 @@ mod tests {
         assert_eq!(shared.available_permits(), 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn priority_cancel_during_wait() {
         let guaranteed = Arc::new(Semaphore::new(0));
         let shared = Arc::new(Semaphore::new(0));
@@ -630,7 +617,7 @@ mod tests {
         assert!(bh.acquire(&cancel).await.is_none());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn priority_blocks_when_neither_available() {
         let guaranteed = Arc::new(Semaphore::new(0));
         let shared = Arc::new(Semaphore::new(0));

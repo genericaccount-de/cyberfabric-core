@@ -14,21 +14,6 @@ pub const DEFAULT_PARTITION_BATCH_LIMIT: u32 = 128;
 /// Default max inner iterations per partition before yielding.
 pub const DEFAULT_MAX_INNER_ITERATIONS: u32 = 8;
 
-/// Default cold reconciler (poker) interval.
-pub const DEFAULT_POKER_INTERVAL: Duration = Duration::from_secs(60);
-
-/// Default message batch size (messages per handler call per partition).
-pub const DEFAULT_MSG_BATCH_SIZE: u32 = 1;
-
-/// Default backoff base delay.
-pub const DEFAULT_BACKOFF_BASE: Duration = Duration::from_secs(1);
-
-/// Default backoff maximum delay.
-pub const DEFAULT_BACKOFF_MAX: Duration = Duration::from_secs(60);
-
-/// Default lease duration for decoupled mode partition locks.
-pub const DEFAULT_LEASE_DURATION: Duration = Duration::from_secs(30);
-
 /// Number of partitions for a queue. Must be a power of 2 in `1..=64`.
 ///
 /// ```
@@ -148,24 +133,6 @@ impl Default for SequencerConfig {
     }
 }
 
-/// Per-queue configuration with sensible defaults.
-#[derive(Debug, Clone)]
-pub struct QueueConfig {
-    /// Lease duration for decoupled mode partition locks.
-    /// Ignored for transactional mode. Default: 30s.
-    pub lease_duration: Duration,
-    /// Messages per handler call per partition. Default: 1.
-    pub msg_batch_size: u32,
-    /// Safety net fallback poll interval per partition. Default: 1s.
-    /// Not exposed in `QueueBuilder` — always uses the default. Override
-    /// only internally (e.g. integration tests).
-    pub(crate) poll_interval: Duration,
-    /// Base delay for exponential backoff on retry. Default: 1s.
-    pub backoff_base: Duration,
-    /// Maximum delay for exponential backoff on retry. Default: 60s.
-    pub backoff_max: Duration,
-}
-
 /// Configuration specific to decoupled handler mode.
 #[derive(Debug, Clone, Copy)]
 pub struct DecoupledConfig {
@@ -176,22 +143,456 @@ pub struct DecoupledConfig {
 impl Default for DecoupledConfig {
     fn default() -> Self {
         Self {
-            lease_duration: DEFAULT_LEASE_DURATION,
+            lease_duration: Duration::from_secs(30),
         }
     }
 }
 
-/// Default vacuum cooldown: 1 hour.
-pub const DEFAULT_VACUUM_COOLDOWN: Duration = Duration::from_secs(3600);
+// ---------------------------------------------------------------------------
+// WorkerTuning — unified per-worker configuration with adaptive pacing
+// ---------------------------------------------------------------------------
 
-impl Default for QueueConfig {
-    fn default() -> Self {
+/// Per-worker timing and behavior configuration.
+///
+/// Controls adaptive pacing (min/active/idle intervals with ramp-down),
+/// retry backoff for handler Retry/Reject, and batch degradation threshold.
+/// All timing decisions live here — workers just report what happened
+/// (Proceed/Idle/Sleep), the loop decides how long to wait.
+///
+/// Use named profiles for common patterns, or the builder for fine-tuning:
+///
+/// ```ignore
+/// // Profile directly
+/// let tuning = WorkerTuning::processor_low_latency();
+///
+/// // Profile + tweaks
+/// let tuning = WorkerTuning::processor_high_throughput()
+///     .batch_size(50)
+///     .retry_base(Duration::from_secs(5));
+///
+/// // On the outbox builder
+/// Outbox::builder(db)
+///     .profile(OutboxProfile::high_throughput())
+///     .processor_tuning(WorkerTuning::processor_high_throughput().batch_size(50))
+///     .start().await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct WorkerTuning {
+    /// Max items per execution cycle.
+    pub batch_size: u32,
+    /// Fastest pace — floor for sustained high-throughput work.
+    /// The worker ramps down to this after consecutive Proceeds.
+    pub min_interval: Duration,
+    /// Starting pace after waking from Idle. Ramps down toward
+    /// `min_interval` on consecutive Proceeds.
+    pub active_interval: Duration,
+    /// Safety-net poll interval while Idle (poker timer).
+    /// If no notifier fires within this window, the worker wakes.
+    pub idle_interval: Duration,
+    /// Subtracted per consecutive Proceed (ramp-down step).
+    pub ramp_step: Duration,
+    /// Base delay on handler Retry/Reject. Escalates exponentially
+    /// via `PartitionMode::current_backoff()`. Processor-only.
+    pub retry_base: Duration,
+    /// Max retry delay (exponential cap). Processor-only.
+    pub retry_max: Duration,
+    /// Consecutive handler failures before batch size degrades.
+    /// Processor-only. Set to 1 for immediate degradation.
+    pub degradation_threshold: u32,
+    /// Lease duration for decoupled mode partition locks.
+    /// Processor-only. Ignored for transactional mode. Default: 30s.
+    pub lease_duration: Duration,
+}
+
+impl WorkerTuning {
+    // -- Consume-return-Self builder methods --
+
+    #[must_use]
+    pub fn batch_size(mut self, n: u32) -> Self {
+        self.batch_size = n;
+        self
+    }
+
+    #[must_use]
+    pub fn min_interval(mut self, d: Duration) -> Self {
+        self.min_interval = d;
+        self
+    }
+
+    #[must_use]
+    pub fn active_interval(mut self, d: Duration) -> Self {
+        self.active_interval = d;
+        self
+    }
+
+    #[must_use]
+    pub fn idle_interval(mut self, d: Duration) -> Self {
+        self.idle_interval = d;
+        self
+    }
+
+    #[must_use]
+    pub fn ramp_step(mut self, d: Duration) -> Self {
+        self.ramp_step = d;
+        self
+    }
+
+    #[must_use]
+    pub fn retry_base(mut self, d: Duration) -> Self {
+        self.retry_base = d;
+        self
+    }
+
+    #[must_use]
+    pub fn retry_max(mut self, d: Duration) -> Self {
+        self.retry_max = d;
+        self
+    }
+
+    #[must_use]
+    pub fn degradation_threshold(mut self, n: u32) -> Self {
+        self.degradation_threshold = n;
+        self
+    }
+
+    #[must_use]
+    pub fn lease_duration(mut self, d: Duration) -> Self {
+        self.lease_duration = d;
+        self
+    }
+
+    // -- Per-worker-type constructors (defaults) --
+
+    /// Processor defaults (balanced profile).
+    #[must_use]
+    pub fn processor() -> Self {
+        Self::processor_default()
+    }
+
+    /// Sequencer defaults (balanced profile).
+    #[must_use]
+    pub fn sequencer() -> Self {
+        Self::sequencer_default()
+    }
+
+    /// Vacuum defaults.
+    #[must_use]
+    pub fn vacuum() -> Self {
         Self {
-            lease_duration: DEFAULT_LEASE_DURATION,
-            msg_batch_size: DEFAULT_MSG_BATCH_SIZE,
-            poll_interval: DEFAULT_POLL_INTERVAL,
-            backoff_base: DEFAULT_BACKOFF_BASE,
-            backoff_max: DEFAULT_BACKOFF_MAX,
+            batch_size: 10_000,
+            min_interval: Duration::from_secs(1),
+            active_interval: Duration::from_secs(1),
+            idle_interval: Duration::from_secs(3600),
+            ramp_step: Duration::ZERO,
+            retry_base: Duration::from_secs(1),
+            retry_max: Duration::from_secs(60),
+            degradation_threshold: 1,
+            lease_duration: Duration::from_secs(30),
         }
+    }
+
+    /// Reconciler defaults.
+    #[must_use]
+    pub fn reconciler() -> Self {
+        Self {
+            batch_size: 1,
+            min_interval: Duration::from_secs(1),
+            active_interval: Duration::from_secs(1),
+            idle_interval: Duration::from_secs(60),
+            ramp_step: Duration::ZERO,
+            retry_base: Duration::from_secs(1),
+            retry_max: Duration::from_secs(60),
+            degradation_threshold: 1,
+            lease_duration: Duration::from_secs(30),
+        }
+    }
+
+    // -- Processor profiles --
+
+    /// Default processor profile. Conservative — start gentle, opt into
+    /// faster profiles when needed.
+    #[must_use]
+    pub fn processor_default() -> Self {
+        Self {
+            batch_size: 10,
+            min_interval: Duration::from_millis(100),
+            active_interval: Duration::from_millis(500),
+            idle_interval: Duration::from_secs(600),
+            ramp_step: Duration::from_millis(50),
+            retry_base: Duration::from_secs(1),
+            retry_max: Duration::from_secs(60),
+            degradation_threshold: 2,
+            lease_duration: Duration::from_secs(30),
+        }
+    }
+
+    /// Low-latency processor profile. Real-time notifications, chat.
+    /// Fast pacing, aggressive retry. Batch size is moderate — latency
+    /// comes from fast intervals, not small batches. Per-message handlers
+    /// (`transactional()`/`decoupled()`) force `batch_size=1` at the factory.
+    #[must_use]
+    pub fn processor_low_latency() -> Self {
+        Self {
+            batch_size: 10,
+            min_interval: Duration::from_millis(1),
+            active_interval: Duration::from_millis(2),
+            idle_interval: Duration::from_secs(60),
+            ramp_step: Duration::from_millis(1),
+            retry_base: Duration::from_millis(100),
+            retry_max: Duration::from_secs(10),
+            degradation_threshold: 3,
+            lease_duration: Duration::from_secs(30),
+        }
+    }
+
+    /// High-throughput processor profile. Bulk ETL, analytics.
+    /// Large batches, fast floor, throughput from batch size.
+    #[must_use]
+    pub fn processor_high_throughput() -> Self {
+        Self {
+            batch_size: 100,
+            min_interval: Duration::from_millis(1),
+            active_interval: Duration::from_millis(20),
+            idle_interval: Duration::from_secs(600),
+            ramp_step: Duration::from_millis(2),
+            retry_base: Duration::from_secs(1),
+            retry_max: Duration::from_secs(60),
+            degradation_threshold: 2,
+            lease_duration: Duration::from_secs(30),
+        }
+    }
+
+    /// Relaxed processor profile. Background jobs, email digests.
+    /// Slow pace, large backoff, immediate degradation.
+    #[must_use]
+    pub fn processor_relaxed() -> Self {
+        Self {
+            batch_size: 10,
+            min_interval: Duration::from_millis(100),
+            active_interval: Duration::from_millis(500),
+            idle_interval: Duration::from_secs(600),
+            ramp_step: Duration::from_millis(50),
+            retry_base: Duration::from_secs(5),
+            retry_max: Duration::from_secs(300),
+            degradation_threshold: 1,
+            lease_duration: Duration::from_secs(30),
+        }
+    }
+
+    // -- Sequencer profiles --
+
+    /// Default sequencer profile. Conservative — matches processor default pacing.
+    #[must_use]
+    pub fn sequencer_default() -> Self {
+        Self {
+            batch_size: 1000,
+            min_interval: Duration::from_millis(100),
+            active_interval: Duration::from_millis(500),
+            idle_interval: Duration::from_secs(600),
+            ramp_step: Duration::from_millis(50),
+            retry_base: Duration::from_millis(100),
+            retry_max: Duration::from_secs(30),
+            degradation_threshold: 1,
+            lease_duration: Duration::from_secs(30),
+        }
+    }
+
+    /// Low-latency sequencer profile.
+    #[must_use]
+    pub fn sequencer_low_latency() -> Self {
+        Self {
+            batch_size: 500,
+            min_interval: Duration::ZERO,
+            active_interval: Duration::from_millis(1),
+            idle_interval: Duration::from_secs(60),
+            ramp_step: Duration::ZERO,
+            retry_base: Duration::from_millis(100),
+            retry_max: Duration::from_secs(30),
+            degradation_threshold: 1,
+            lease_duration: Duration::from_secs(30),
+        }
+    }
+
+    /// High-throughput sequencer profile.
+    #[must_use]
+    pub fn sequencer_high_throughput() -> Self {
+        Self {
+            batch_size: 2000,
+            min_interval: Duration::from_millis(10),
+            active_interval: Duration::from_millis(100),
+            idle_interval: Duration::from_secs(600),
+            ramp_step: Duration::from_millis(10),
+            retry_base: Duration::from_millis(100),
+            retry_max: Duration::from_secs(30),
+            degradation_threshold: 1,
+            lease_duration: Duration::from_secs(30),
+        }
+    }
+
+    /// Relaxed sequencer profile.
+    #[must_use]
+    pub fn sequencer_relaxed() -> Self {
+        Self {
+            batch_size: 1000,
+            min_interval: Duration::from_millis(100),
+            active_interval: Duration::from_millis(500),
+            idle_interval: Duration::from_secs(600),
+            ramp_step: Duration::from_millis(100),
+            retry_base: Duration::from_millis(100),
+            retry_max: Duration::from_secs(30),
+            degradation_threshold: 1,
+            lease_duration: Duration::from_secs(30),
+        }
+    }
+}
+
+impl From<&WorkerTuning> for super::taskward::PacingConfig {
+    fn from(t: &WorkerTuning) -> Self {
+        Self {
+            min_interval: t.min_interval,
+            active_interval: t.active_interval,
+            ramp_step: t.ramp_step,
+        }
+    }
+}
+
+impl From<WorkerTuning> for super::taskward::PacingConfig {
+    fn from(t: WorkerTuning) -> Self {
+        Self::from(&t)
+    }
+}
+
+impl WorkerTuning {
+    /// Validate that field invariants hold.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `min_interval > active_interval`, `retry_base > retry_max`,
+    /// `batch_size == 0`, `retry_base` is zero, or `degradation_threshold` is zero.
+    pub fn validate(&self) {
+        assert!(
+            self.batch_size >= 1,
+            "WorkerTuning: batch_size must be >= 1"
+        );
+        assert!(
+            self.min_interval <= self.active_interval,
+            "WorkerTuning: min_interval ({:?}) must be <= active_interval ({:?})",
+            self.min_interval,
+            self.active_interval
+        );
+        assert!(
+            !self.retry_base.is_zero(),
+            "WorkerTuning: retry_base must be > 0 (got ZERO)"
+        );
+        assert!(
+            self.retry_base <= self.retry_max,
+            "WorkerTuning: retry_base ({:?}) must be <= retry_max ({:?})",
+            self.retry_base,
+            self.retry_max
+        );
+        assert!(
+            self.degradation_threshold >= 1,
+            "WorkerTuning: degradation_threshold must be >= 1 (got {})",
+            self.degradation_threshold
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OutboxProfile — global profile bundling all worker tunings
+// ---------------------------------------------------------------------------
+
+/// Global outbox profile that sets all worker types at once.
+///
+/// Use `.profile()` on `OutboxBuilder` for one-line configuration.
+/// Per-worker overrides (`.processor_tuning()`, etc.) take precedence.
+///
+/// ```ignore
+/// Outbox::builder(db)
+///     .profile(OutboxProfile::high_throughput())
+///     .processor_tuning(WorkerTuning::processor_high_throughput().batch_size(50))
+///     .start().await?;
+/// ```
+#[derive(Debug, Clone)]
+pub struct OutboxProfile {
+    pub sequencer: WorkerTuning,
+    pub processor: WorkerTuning,
+    pub vacuum: WorkerTuning,
+    pub reconciler: WorkerTuning,
+}
+
+impl OutboxProfile {
+    /// Balanced profile. General purpose.
+    #[must_use]
+    pub fn default_profile() -> Self {
+        Self {
+            sequencer: WorkerTuning::sequencer_default(),
+            processor: WorkerTuning::processor_default(),
+            vacuum: WorkerTuning::vacuum(),
+            reconciler: WorkerTuning::reconciler(),
+        }
+    }
+
+    /// Low-latency profile. Real-time notifications, chat.
+    #[must_use]
+    pub fn low_latency() -> Self {
+        Self {
+            sequencer: WorkerTuning::sequencer_low_latency(),
+            processor: WorkerTuning::processor_low_latency(),
+            vacuum: WorkerTuning::vacuum(),
+            reconciler: WorkerTuning::reconciler().idle_interval(Duration::from_secs(30)),
+        }
+    }
+
+    /// High-throughput profile. Bulk ETL, analytics.
+    #[must_use]
+    pub fn high_throughput() -> Self {
+        Self {
+            sequencer: WorkerTuning::sequencer_high_throughput(),
+            processor: WorkerTuning::processor_high_throughput(),
+            vacuum: WorkerTuning::vacuum(),
+            reconciler: WorkerTuning::reconciler(),
+        }
+    }
+
+    /// Relaxed profile. Background jobs, email digests.
+    #[must_use]
+    pub fn relaxed() -> Self {
+        Self {
+            sequencer: WorkerTuning::sequencer_relaxed(),
+            processor: WorkerTuning::processor_relaxed(),
+            vacuum: WorkerTuning::vacuum(),
+            reconciler: WorkerTuning::reconciler().idle_interval(Duration::from_secs(120)),
+        }
+    }
+}
+
+impl Default for OutboxProfile {
+    fn default() -> Self {
+        Self::default_profile()
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+
+    // -- Bug 3: validate() doesn't catch zero retry_base or zero degradation_threshold --
+
+    #[test]
+    #[should_panic(expected = "retry_base must be > 0")]
+    fn validate_rejects_zero_retry_base() {
+        WorkerTuning::processor_default()
+            .retry_base(Duration::ZERO)
+            .validate();
+    }
+
+    #[test]
+    #[should_panic(expected = "degradation_threshold must be >= 1")]
+    fn validate_rejects_zero_degradation_threshold() {
+        WorkerTuning::processor_default()
+            .degradation_threshold(0)
+            .validate();
     }
 }

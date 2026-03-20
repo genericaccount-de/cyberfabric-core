@@ -6,6 +6,31 @@ decision-makers: OAGW Team
 
 # Request Routing — Path-Based Routing Between API Handler, Control Plane, and Data Plane
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Routing Rules](#routing-rules)
+  - [Request Flows](#request-flows)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Path-based routing](#path-based-routing)
+  - [Control Plane handles everything](#control-plane-handles-everything)
+- [Appendix A: Proxy API Examples and Routing Behavior](#appendix-a-proxy-api-examples-and-routing-behavior)
+  - [Request Classification (HTTP vs gRPC)](#request-classification-http-vs-grpc)
+  - [API Call Examples](#api-call-examples)
+  - [X-OAGW-Target-Host Behavior Matrix](#x-oagw-target-host-behavior-matrix)
+  - [Plugin Deletion Behavior](#plugin-deletion-behavior)
+  - [Audit Log JSON Format](#audit-log-json-format)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-request-routing`
 
 ## Context and Problem Statement

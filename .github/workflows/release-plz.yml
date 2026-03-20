@@ -68,7 +68,6 @@ jobs:
       }}
     permissions:
       actions: write
-      contents: read
     steps:
       - name: Delete PR rust caches
         env:
@@ -192,6 +191,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CRATES_IO_TOKEN }}
+          CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
 
       - name: Disk report (post-mortem)
         if: always()

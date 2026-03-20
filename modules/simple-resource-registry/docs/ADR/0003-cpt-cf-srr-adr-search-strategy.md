@@ -4,6 +4,23 @@ date: 2026-02-24
 ---
 # ADR-0003: Search Capability is Backend-Defined and Routed Per Resource Type
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Require every backend to provide its own dedicated index](#require-every-backend-to-provide-its-own-dedicated-index)
+  - [Require a single external index for all content across all backends](#require-a-single-external-index-for-all-content-across-all-backends)
+  - [Make search a backend capability, enabled or disabled per resource type via routing](#make-search-a-backend-capability-enabled-or-disabled-per-resource-type-via-routing)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-srr-adr-search-strategy`
 
 ## Context and Problem Statement

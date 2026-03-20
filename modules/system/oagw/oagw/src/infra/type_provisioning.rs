@@ -123,12 +123,19 @@ struct HeadersConfig {
     response: Option<ResponseHeaderRules>,
 }
 
+#[derive(Deserialize)]
+struct PluginBinding {
+    plugin_ref: String,
+    #[serde(default)]
+    config: HashMap<String, String>,
+}
+
 #[derive(Deserialize, Default)]
 struct PluginsConfig {
     #[serde(default)]
     sharing: SharingMode,
     #[serde(default)]
-    items: Vec<String>,
+    items: Vec<PluginBinding>,
 }
 
 #[derive(Deserialize, Default)]
@@ -449,11 +456,20 @@ impl From<RateLimitConfig> for domain::RateLimitConfig {
     }
 }
 
+impl From<PluginBinding> for domain::PluginBinding {
+    fn from(v: PluginBinding) -> Self {
+        Self {
+            plugin_ref: v.plugin_ref,
+            config: v.config,
+        }
+    }
+}
+
 impl From<PluginsConfig> for domain::PluginsConfig {
     fn from(v: PluginsConfig) -> Self {
         Self {
             sharing: v.sharing.into(),
-            items: v.items,
+            items: v.items.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -916,7 +932,7 @@ mod tests {
             },
             "plugins": {
                 "sharing": "inherit",
-                "items": ["plugin-a"]
+                "items": [{"plugin_ref": "plugin-a"}]
             },
             "rate_limit": {
                 "sustained": {"rate": 100, "window": "minute"},
@@ -951,7 +967,8 @@ mod tests {
 
         let plugins = req.plugins.as_ref().unwrap();
         assert_eq!(plugins.sharing, domain::SharingMode::Inherit);
-        assert_eq!(plugins.items, vec!["plugin-a"]);
+        assert_eq!(plugins.items.len(), 1);
+        assert_eq!(plugins.items[0].plugin_ref, "plugin-a");
 
         let rl = req.rate_limit.as_ref().unwrap();
         assert_eq!(rl.sustained.rate, 100);

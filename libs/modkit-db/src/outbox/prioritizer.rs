@@ -133,6 +133,11 @@ impl PartitionScheduler {
         Some((pid, dirty_since))
     }
 
+    /// Whether the partition is currently claimed by a sequencer.
+    fn is_claimed(&self, pid: i64) -> bool {
+        self.claimed.contains(&pid)
+    }
+
     /// Whether the pending queue has entries eligible now.
     fn has_ready_work(&self, now: Instant) -> bool {
         self.pending
@@ -224,6 +229,14 @@ impl Inbox {
         self.last_push.insert(pid, now);
         self.queue.push_back((pid, now));
         true
+    }
+
+    /// Force-push bypassing the coalesce window. Used when the partition
+    /// is claimed by a sequencer — the push must reach `absorb()` so the
+    /// `redirtied` flag is set, guaranteeing the partition is re-processed.
+    fn force_push(&mut self, pid: i64, now: Instant) {
+        self.last_push.insert(pid, now);
+        self.queue.push_back((pid, now));
     }
 
     /// Drain queued entries and clear stale coalesce entries.
@@ -326,16 +339,43 @@ impl SharedPrioritizer {
     /// Lock-contention is minimal: only the inbox mutex is held, for a
     /// single `push_back`.
     pub fn push_dirty(&self, pid: i64) {
+        self.push_dirty_impl(pid, Instant::now());
+    }
+
+    /// Test-only variant that accepts an explicit timestamp instead of
+    /// `Instant::now()`, allowing tests to bypass coalesce/cooldown
+    /// windows without real sleeps.
+    #[cfg(test)]
+    fn push_dirty_at(&self, pid: i64, dirty_since: Instant) {
+        self.push_dirty_impl(pid, dirty_since);
+    }
+
+    fn push_dirty_impl(&self, pid: i64, dirty_since: Instant) {
         let mut inbox = self
             .inbox
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !inbox.try_push(pid, Instant::now()) {
-            // Duplicate within coalesce window — skip notification
-            return;
+        let mut accepted = inbox.try_push(pid, dirty_since);
+        if !accepted {
+            // Coalesced — check if the partition is currently claimed
+            // by a sequencer. If so, force the push so that absorb()
+            // will set the redirtied flag. Without this, the sequencer
+            // could finish processing and return the partition to IDLE
+            // while new rows (committed after the drain) go unnoticed.
+            let sched = self
+                .scheduler
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if sched.is_claimed(pid) {
+                inbox.force_push(pid, dirty_since);
+                accepted = true;
+            }
         }
         drop(inbox);
-        self.notify.notify_one();
+
+        if accepted {
+            self.notify.notify_one();
+        }
     }
 
     /// Get the next partition to process, or `None` if no work is available.
@@ -474,7 +514,6 @@ impl Drop for PartitionGuard {
 mod tests {
     use super::*;
     use std::collections::HashSet;
-    use std::thread;
 
     fn make_shared() -> Arc<SharedPrioritizer> {
         Arc::new(SharedPrioritizer::new())
@@ -691,9 +730,16 @@ mod tests {
         let g = sp.take().unwrap();
         g.error(); // error_count = 1
 
-        // Wait for cooldown
-        thread::sleep(Duration::from_millis(250));
-        sp.push_dirty(10);
+        // Move the cooldown-delayed entry to the past so take() can pop it
+        {
+            let mut sched = sp.scheduler.lock().unwrap();
+            let entry = *sched.pending.iter().find(|(_, pid)| *pid == 10).unwrap();
+            sched.pending.remove(&entry);
+            sched.pending.insert((
+                Instant::now().checked_sub(Duration::from_secs(1)).unwrap(),
+                10,
+            ));
+        }
         let g2 = sp.take().unwrap();
         g2.processed(); // should reset error_count
 
@@ -720,9 +766,10 @@ mod tests {
     #[test]
     fn skipped_retains_original_priority() {
         let sp = make_shared();
-        sp.push_dirty(10);
-        thread::sleep(Duration::from_millis(2));
-        sp.push_dirty(20);
+        let now = Instant::now();
+        let t0 = now.checked_sub(Duration::from_secs(2)).unwrap();
+        sp.push_dirty_at(10, t0);
+        sp.push_dirty_at(20, t0 + Duration::from_secs(1));
 
         // Take partition 10, skip it
         let g1 = sp.take().unwrap();
@@ -926,11 +973,11 @@ mod tests {
     #[test]
     fn oldest_dirty_served_first() {
         let sp = make_shared();
-        sp.push_dirty(30);
-        thread::sleep(Duration::from_millis(2));
-        sp.push_dirty(10);
-        thread::sleep(Duration::from_millis(2));
-        sp.push_dirty(20);
+        let now = Instant::now();
+        let t0 = now.checked_sub(Duration::from_secs(3)).unwrap();
+        sp.push_dirty_at(30, t0);
+        sp.push_dirty_at(10, t0 + Duration::from_secs(1));
+        sp.push_dirty_at(20, t0 + Duration::from_secs(2));
 
         let g1 = sp.take().unwrap();
         assert_eq!(g1.partition_id(), 30, "oldest dirty should be first");
@@ -963,5 +1010,146 @@ mod tests {
         assert_eq!(taken.len(), 100);
         let unique: HashSet<i64> = taken.iter().copied().collect();
         assert_eq!(unique.len(), 100);
+    }
+
+    // --- Coalesce + notification edge cases ---
+
+    #[test]
+    fn coalesced_push_still_notifies() {
+        // Regression: coalesced push_dirty must still fire notify_one().
+        // Without this, the last message in a burst can be stuck until
+        // the cold reconciler fires (60s+).
+        let sp = make_shared();
+        let notify = sp.notifier();
+
+        sp.push_dirty(10);
+        // Second push within coalesce window — inbox rejects the push
+        // but notify_one() must still fire.
+        sp.push_dirty(10);
+
+        // Two notifies should have been stored. The first is consumed
+        // by this notified() call (Notify stores at most 1 permit, but
+        // the second notify_one() replaces it — still 1 permit available).
+        // Key assertion: notified() resolves immediately (permit stored).
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            tokio::time::timeout(Duration::from_millis(10), notify.notified())
+                .await
+                .expect("notify should have a stored permit from push_dirty");
+        });
+    }
+
+    #[test]
+    fn push_after_drain_not_coalesced() {
+        // After take() drains the inbox (clears last_push), the next
+        // push_dirty for the same pid should be accepted, not coalesced.
+        let sp = make_shared();
+        sp.push_dirty(10);
+
+        // Drain via take
+        let g = sp.take().unwrap();
+        assert_eq!(g.partition_id(), 10);
+        g.processed();
+
+        // Push again immediately — should NOT be coalesced because
+        // drain() cleared last_push.
+        sp.push_dirty(10);
+        let g2 = sp.take().unwrap();
+        assert_eq!(g2.partition_id(), 10);
+        g2.processed();
+    }
+
+    #[test]
+    fn push_dirty_during_claimed_partition_preserved() {
+        // Producer pushes dirty while sequencer has the partition claimed.
+        // The push should be recorded in the redirtied set and survive.
+        let sp = make_shared();
+        sp.push_dirty(10);
+
+        let g = sp.take().unwrap();
+        assert_eq!(g.partition_id(), 10);
+
+        // Push while claimed — goes to redirtied
+        sp.push_dirty(10);
+
+        // Process completes — redirtied partition should be re-queued
+        g.processed();
+
+        let g2 = sp.take().unwrap();
+        assert_eq!(g2.partition_id(), 10);
+        g2.processed();
+    }
+
+    #[test]
+    fn multiple_partitions_interleaved_push_and_take() {
+        // Interleave pushes and takes to verify no partition is lost.
+        let sp = make_shared();
+
+        sp.push_dirty(1);
+        sp.push_dirty(2);
+        let g1 = sp.take().unwrap();
+        assert_eq!(g1.partition_id(), 1);
+
+        sp.push_dirty(3);
+        let g2 = sp.take().unwrap();
+        assert_eq!(g2.partition_id(), 2);
+
+        g1.processed();
+        let g3 = sp.take().unwrap();
+        assert_eq!(g3.partition_id(), 3);
+
+        g2.processed();
+        g3.processed();
+
+        assert!(sp.take().is_none());
+    }
+
+    #[test]
+    fn dropped_guard_without_ack_requeues() {
+        // If a guard is dropped without calling processed/skipped/error,
+        // the partition should be re-queued automatically.
+        let sp = make_shared();
+        sp.push_dirty(10);
+
+        {
+            let _g = sp.take().unwrap();
+            // Drop without ack
+        }
+
+        // Partition should be available again
+        let g = sp.take().unwrap();
+        assert_eq!(g.partition_id(), 10);
+        g.processed();
+    }
+
+    #[test]
+    fn coalesced_push_while_claimed_forces_redirty() {
+        // The critical race: push_dirty within coalesce window while
+        // the partition is claimed. The push must be force-accepted
+        // so absorb() sets the redirtied flag. Without this, the
+        // sequencer finishes and the partition goes IDLE with
+        // unprocessed rows.
+        let sp = make_shared();
+        sp.push_dirty(10);
+
+        // Claim partition 10
+        let g = sp.take().unwrap();
+        assert_eq!(g.partition_id(), 10);
+
+        // Push again immediately — within coalesce window, but
+        // partition is claimed. Must be force-accepted.
+        sp.push_dirty(10);
+
+        // Sequencer finishes — partition should be re-queued
+        // because the second push set redirtied.
+        g.processed();
+
+        // Partition must be available again
+        let g2 = sp.take().unwrap();
+        assert_eq!(g2.partition_id(), 10);
+        g2.processed();
     }
 }

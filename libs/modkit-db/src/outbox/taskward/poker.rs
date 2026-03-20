@@ -91,7 +91,7 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn stored_permit_semantics() {
         // Prove: a poke that fires while nobody is awaiting creates a
         // stored permit that the next notified() consumes immediately.

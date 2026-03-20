@@ -8,9 +8,8 @@ pub mod init;
 pub mod throttled_log;
 
 pub use config::{
-    Exporter, HttpOpts, LogsCorrelation, MetricsConfig, Propagation, Sampler, TracingConfig,
+    Exporter, HttpOpts, LogsCorrelation, MetricsConfig, OpenTelemetryConfig, OpenTelemetryResource,
+    Propagation, Sampler, TracingConfig,
 };
-#[cfg(feature = "otel")]
-pub use init::init_metrics;
-pub use init::{init_tracing, shutdown_tracing};
+pub use init::{init_metrics_provider, init_tracing, shutdown_tracing};
 pub use throttled_log::ThrottledLog;

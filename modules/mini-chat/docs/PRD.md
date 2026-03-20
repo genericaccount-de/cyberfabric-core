@@ -717,7 +717,7 @@ Prometheus labels MUST NOT include high-cardinality identifiers such as `tenant_
 
 - `mini_chat_audit_emit_total{result}`
 - `mini_chat_audit_redaction_hits_total{pattern}`
-- `mini_chat_audit_emit_latency_ms`
+- `mini_chat_finalization_latency_ms`
 
 ##### DB health (infra/storage)
 

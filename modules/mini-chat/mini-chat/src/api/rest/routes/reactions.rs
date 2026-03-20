@@ -5,6 +5,8 @@ use modkit::api::operation_builder::OperationBuilder;
 use super::AiChatLicense;
 use crate::api::rest::{dto, handlers};
 
+const API_TAG: &str = "Mini Chat Reactions";
+
 pub(super) fn register_reaction_routes(
     mut router: Router,
     openapi: &dyn OpenApiRegistry,
@@ -16,7 +18,7 @@ pub(super) fn register_reaction_routes(
     ))
     .operation_id("mini_chat.put_reaction")
     .summary("Set or update a reaction on a message")
-    .tag("reactions")
+    .tag(API_TAG)
     .authenticated()
     .require_license_features([&AiChatLicense])
     .path_param("id", "Chat UUID")
@@ -33,7 +35,7 @@ pub(super) fn register_reaction_routes(
     ))
     .operation_id("mini_chat.delete_reaction")
     .summary("Remove a reaction from a message")
-    .tag("reactions")
+    .tag(API_TAG)
     .authenticated()
     .require_license_features([&AiChatLicense])
     .path_param("id", "Chat UUID")

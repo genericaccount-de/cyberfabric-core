@@ -6,6 +6,31 @@ decision-makers: OAGW Team
 
 # Control Plane Caching — Multi-Layer L1/L2 Strategy
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Cache Layers](#cache-layers)
+  - [Lookup Flow](#lookup-flow)
+  - [Cache Keys](#cache-keys)
+  - [Cache Invalidation](#cache-invalidation)
+  - [Deployment Modes](#deployment-modes)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [L1 Only (In-Memory)](#l1-only-in-memory)
+  - [L2 Only (Redis)](#l2-only-redis)
+  - [Multi-layer L1 + L2 + Database](#multi-layer-l1--l2--database)
+  - [Write-Through Cache](#write-through-cache)
+  - [Risks](#risks)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-data-plane-caching`
 
 ## Context and Problem Statement

@@ -7,16 +7,17 @@
 use crate::domain::error::DomainError;
 use crate::domain::llm::Usage;
 use crate::domain::repos::MessageRepository;
-use crate::domain::stream_events::{DeltaData, DoneData, StreamEvent};
+use crate::domain::stream_events::{DeltaData, DoneData, StreamEvent, StreamStartedData};
 use crate::infra::db::entity::chat_turn::Model as TurnModel;
 use modkit_security::AccessScope;
 
 use super::DbProvider;
 
-/// Pair of SSE events produced by replay.
+/// Triple of SSE events produced by replay.
 #[derive(Debug)]
 #[allow(de0309_must_have_domain_model)]
 pub struct ReplayEvents {
+    pub stream_started: StreamEvent,
     pub delta: StreamEvent,
     pub done: StreamEvent,
 }
@@ -53,13 +54,18 @@ pub async fn replay_turn<MR: MessageRepository>(
             ))
         })?;
 
+    let stream_started = StreamEvent::StreamStarted(StreamStartedData {
+        request_id: turn.request_id,
+        message_id: assistant_msg_id,
+        is_new_turn: false,
+    });
+
     let delta = StreamEvent::Delta(DeltaData {
         r#type: "text",
         content: message.content,
     });
 
     let done = StreamEvent::Done(Box::new(DoneData {
-        message_id: Some(assistant_msg_id.to_string()),
         usage: Some(Usage {
             input_tokens: message.input_tokens,
             output_tokens: message.output_tokens,
@@ -69,9 +75,14 @@ pub async fn replay_turn<MR: MessageRepository>(
         quota_decision: reconstruct_quota_decision(turn, selected_model),
         downgrade_from: reconstruct_downgrade_from(turn, selected_model),
         downgrade_reason: None,
+        quota_warnings: None,
     }));
 
-    Ok(ReplayEvents { delta, done })
+    Ok(ReplayEvents {
+        stream_started,
+        delta,
+        done,
+    })
 }
 
 fn reconstruct_quota_decision(turn: &TurnModel, selected_model: &str) -> String {
@@ -205,6 +216,16 @@ mod tests {
             unimplemented!()
         }
 
+        async fn soft_delete_by_request_id<C: DBRunner>(
+            &self,
+            _: &C,
+            _: &AccessScope,
+            _: Uuid,
+            _: Uuid,
+        ) -> Result<u64, DomainError> {
+            unimplemented!()
+        }
+
         async fn snapshot_boundary<C: DBRunner>(
             &self,
             _: &C,
@@ -300,7 +321,7 @@ mod tests {
     async fn replay_turn_happy_path() {
         let db_raw = inmem_db().await;
         let db = mock_db_provider(db_raw);
-        let scope = AccessScope::allow_all().tenant_only();
+        let scope = AccessScope::allow_all();
 
         let msg_id = Uuid::new_v4();
         let turn = make_completed_turn(Some(msg_id), Some("gpt-5.2".to_owned()));
@@ -312,6 +333,16 @@ mod tests {
         let result = replay_turn(&db, &repo, &scope, &turn, "gpt-5.2")
             .await
             .expect("replay should succeed");
+
+        // Verify stream_started
+        match &result.stream_started {
+            StreamEvent::StreamStarted(d) => {
+                assert_eq!(d.request_id, turn.request_id);
+                assert_eq!(d.message_id, msg_id);
+                assert!(!d.is_new_turn);
+            }
+            other => panic!("expected StreamStarted, got {other:?}"),
+        }
 
         // Verify delta
         match &result.delta {
@@ -325,7 +356,6 @@ mod tests {
         // Verify done
         match &result.done {
             StreamEvent::Done(d) => {
-                assert_eq!(d.message_id, Some(msg_id.to_string()));
                 assert_eq!(d.effective_model, "gpt-5.2");
                 assert_eq!(d.selected_model, "gpt-5.2");
                 let usage = d.usage.as_ref().expect("usage should be present");
@@ -342,7 +372,7 @@ mod tests {
     async fn replay_turn_no_downgrade() {
         let db_raw = inmem_db().await;
         let db = mock_db_provider(db_raw);
-        let scope = AccessScope::allow_all().tenant_only();
+        let scope = AccessScope::allow_all();
 
         let msg_id = Uuid::new_v4();
         let turn = make_completed_turn(Some(msg_id), Some("gpt-5.2".to_owned()));
@@ -370,7 +400,7 @@ mod tests {
     async fn replay_turn_downgrade_detected() {
         let db_raw = inmem_db().await;
         let db = mock_db_provider(db_raw);
-        let scope = AccessScope::allow_all().tenant_only();
+        let scope = AccessScope::allow_all();
 
         let msg_id = Uuid::new_v4();
         // effective_model differs from selected_model → downgrade
@@ -400,7 +430,7 @@ mod tests {
     async fn replay_turn_missing_assistant_message_id() {
         let db_raw = inmem_db().await;
         let db = mock_db_provider(db_raw);
-        let scope = AccessScope::allow_all().tenant_only();
+        let scope = AccessScope::allow_all();
 
         let turn = make_completed_turn(None, Some("gpt-5.2".to_owned()));
         let repo = MockMessageRepo::new();
@@ -419,7 +449,7 @@ mod tests {
     async fn replay_turn_message_not_found() {
         let db_raw = inmem_db().await;
         let db = mock_db_provider(db_raw);
-        let scope = AccessScope::allow_all().tenant_only();
+        let scope = AccessScope::allow_all();
 
         let msg_id = Uuid::new_v4();
         let turn = make_completed_turn(Some(msg_id), Some("gpt-5.2".to_owned()));

@@ -1,7 +1,7 @@
 [package]
 name = "cf-credstore-sdk"
 description = "SDK for credstore module: API traits, models, and error definitions"
-version = "0.1.8"
+version = "0.1.12"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -21,6 +21,7 @@ workspace = true
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+zeroize = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 schemars = { workspace = true }
@@ -32,3 +33,6 @@ gts-macros = { workspace = true }
 # ModKit dependencies
 modkit = { workspace = true }
 modkit-security = { workspace = true }
+
+# Domain types owned by tenant-resolver
+tenant-resolver-sdk = { workspace = true }

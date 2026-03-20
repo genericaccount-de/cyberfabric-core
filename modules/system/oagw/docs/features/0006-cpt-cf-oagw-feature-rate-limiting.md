@@ -1,5 +1,39 @@
 # Feature: Rate Limiting & Resilience
 
+
+<!-- toc -->
+
+- [1. Feature Context](#1-feature-context)
+  - [1.1 Overview](#11-overview)
+  - [1.2 Purpose](#12-purpose)
+  - [1.3 Actors](#13-actors)
+  - [1.4 References](#14-references)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
+  - [Rate-Limited Proxy Request](#rate-limited-proxy-request)
+  - [Configure Rate Limits](#configure-rate-limits)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
+  - [Token Bucket Rate Check](#token-bucket-rate-check)
+  - [Hierarchical Rate Limit Merge](#hierarchical-rate-limit-merge)
+  - [Circuit Breaker State Evaluation](#circuit-breaker-state-evaluation)
+  - [Concurrency Permit Acquisition](#concurrency-permit-acquisition)
+  - [Backpressure Queue Management](#backpressure-queue-management)
+- [4. States (CDSL)](#4-states-cdsl)
+  - [Circuit Breaker State Machine](#circuit-breaker-state-machine)
+- [5. Definitions of Done](#5-definitions-of-done)
+  - [Implement Token Bucket Rate Limiter](#implement-token-bucket-rate-limiter)
+  - [Implement Rate Limit Response Headers](#implement-rate-limit-response-headers)
+  - [Implement Hierarchical Rate Limit Merge](#implement-hierarchical-rate-limit-merge)
+  - [Implement Circuit Breaker State Machine](#implement-circuit-breaker-state-machine)
+  - [Implement Concurrency Control](#implement-concurrency-control)
+  - [Implement Backpressure Queueing](#implement-backpressure-queueing)
+- [6. Acceptance Criteria](#6-acceptance-criteria)
+- [7. Additional Context](#7-additional-context)
+  - [Performance Considerations](#performance-considerations)
+  - [Distributed State](#distributed-state)
+  - [Deliberate Omissions](#deliberate-omissions)
+
+<!-- /toc -->
+
 - [ ] `p2` - **ID**: `cpt-cf-oagw-featstatus-rate-limiting-implemented`
 
 <!-- reference to DECOMPOSITION entry -->

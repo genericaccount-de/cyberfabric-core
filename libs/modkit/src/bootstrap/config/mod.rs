@@ -7,14 +7,28 @@ mod dump;
 use anyhow::{Context, Result, ensure};
 // Use DB config types from modkit-db
 pub use modkit_db::{DbConnConfig, GlobalDatabaseConfig, PoolCfg};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::Level;
 
 use crate::ConfigProvider;
-use crate::telemetry::TracingConfig;
+use crate::telemetry::OpenTelemetryConfig;
 use url::Url;
+
+/// Error type for vendor configuration access.
+#[derive(thiserror::Error, Debug)]
+pub enum VendorConfigError {
+    #[error("vendor '{vendor}' not found in configuration")]
+    NotFound { vendor: String },
+    #[error("invalid config for vendor '{vendor}': {source}")]
+    InvalidConfig {
+        vendor: String,
+        #[source]
+        source: serde_json::Error,
+    },
+}
 
 // Re-export dump functions
 pub use dump::{
@@ -85,15 +99,19 @@ pub struct AppConfig {
     /// Logging configuration
     #[serde(default = "default_logging_config")]
     pub logging: LoggingConfig,
-    /// Tracing configuration.
+    /// OpenTelemetry configuration (resource, tracing, metrics).
     #[serde(default)]
-    pub tracing: TracingConfig,
+    pub opentelemetry: OpenTelemetryConfig,
     /// Directory containing per-module YAML files (optional).
     #[serde(default)]
     pub modules_dir: Option<String>,
     /// Per-module configuration bag: `module_name` → arbitrary JSON/YAML value.
     #[serde(default)]
     pub modules: HashMap<String, serde_json::Value>,
+    /// Per-vendor configuration bag: `vendor_name` → arbitrary JSON/YAML value.
+    /// Allows vendors to add their own typed configuration sections.
+    #[serde(default)]
+    pub vendor: VendorConfig,
 }
 
 impl Default for AppConfig {
@@ -103,9 +121,10 @@ impl Default for AppConfig {
             server,
             database: None,
             logging: default_logging_config(),
-            tracing: TracingConfig::default(),
+            opentelemetry: OpenTelemetryConfig::default(),
             modules_dir: None,
             modules: HashMap::new(),
+            vendor: VendorConfig::new(),
         }
     }
 }
@@ -159,6 +178,11 @@ pub enum ConsoleFormat {
 /// Logging configuration - maps subsystem names to their logging settings.
 /// Key "default" is the catch-all for logs that don't match explicit subsystems.
 pub type LoggingConfig = HashMap<String, Section>;
+
+/// Per-vendor configuration bag: vendor name → arbitrary JSON/YAML value.
+/// Each vendor's section can be deserialized into a typed struct via
+/// [`AppConfig::vendor_config`] or [`AppConfig::vendor_config_or_default`].
+pub type VendorConfig = HashMap<String, serde_json::Value>;
 
 // ================= Custom serde module for optional Level (supports "off") =================
 mod optional_level_serde {
@@ -329,6 +353,45 @@ impl AppConfig {
     /// Returns an error if serialization fails.
     pub fn to_yaml(&self) -> Result<String> {
         serde_saphyr::to_string(self).context("Failed to serialize config to YAML")
+    }
+
+    /// Deserialize a vendor configuration section into a typed struct.
+    ///
+    /// # Errors
+    /// Returns `VendorConfigError::NotFound` if the vendor is not present,
+    /// or `VendorConfigError::InvalidConfig` if deserialization fails.
+    pub fn vendor_config<T: DeserializeOwned>(
+        &self,
+        vendor_name: &str,
+    ) -> Result<T, VendorConfigError> {
+        let raw = self
+            .vendor
+            .get(vendor_name)
+            .ok_or_else(|| VendorConfigError::NotFound {
+                vendor: vendor_name.to_owned(),
+            })?;
+        T::deserialize(raw).map_err(|e| VendorConfigError::InvalidConfig {
+            vendor: vendor_name.to_owned(),
+            source: e,
+        })
+    }
+
+    /// Deserialize a vendor configuration section, returning `T::default()` if absent.
+    ///
+    /// # Errors
+    /// Returns `VendorConfigError::InvalidConfig` if the section exists but cannot be
+    /// deserialized into `T`.
+    pub fn vendor_config_or_default<T: DeserializeOwned + Default>(
+        &self,
+        vendor_name: &str,
+    ) -> Result<T, VendorConfigError> {
+        let Some(raw) = self.vendor.get(vendor_name) else {
+            return Ok(T::default());
+        };
+        T::deserialize(raw).map_err(|e| VendorConfigError::InvalidConfig {
+            vendor: vendor_name.to_owned(),
+            source: e,
+        })
     }
 
     /// Apply overrides from command line arguments.
@@ -993,7 +1056,7 @@ impl RenderedDbConfig {
 /// - Database configuration (structured, for field-by-field merge in `OoP`)
 /// - Module config section
 /// - Logging configuration (for key-by-key merge in `OoP`)
-/// - Tracing configuration for OTEL
+/// - OpenTelemetry configuration (resource, tracing, metrics)
 ///
 /// The runtime section is excluded as it's only relevant for the master host.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1009,9 +1072,9 @@ pub struct RenderedModuleConfig {
     /// `OoP` module will merge this with local --config (local keys override master keys).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingConfig>,
-    /// Tracing configuration from master host for OTEL initialization
+    /// OpenTelemetry configuration from master host (resource, tracing, metrics).
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub tracing: Option<TracingConfig>,
+    pub opentelemetry: Option<OpenTelemetryConfig>,
 }
 
 impl RenderedModuleConfig {
@@ -1077,9 +1140,9 @@ pub fn render_module_config_for_oop(
     // Pass logging config from master host so OoP modules can merge with their local config
     let logging = app.logging.clone();
 
-    // Pass tracing config from master host so OoP modules use the same OTEL settings
-    let tracing = if app.tracing.enabled {
-        Some(app.tracing.clone())
+    // Pass OpenTelemetry config from master host so OoP modules use the same settings
+    let opentelemetry = if app.opentelemetry.tracing.enabled || app.opentelemetry.metrics.enabled {
+        Some(app.opentelemetry.clone())
     } else {
         None
     };
@@ -1088,7 +1151,7 @@ pub fn render_module_config_for_oop(
         database,
         config,
         logging: Some(logging),
-        tracing,
+        opentelemetry,
     })
 }
 
@@ -2685,6 +2748,261 @@ logging:
         assert!(modules.contains_key("module_a"));
         assert!(modules.contains_key("module_b"));
         assert!(modules.contains_key("module_c"));
+    }
+
+    // ========== Vendor configuration tests ==========
+
+    #[derive(Debug, Deserialize, Default, PartialEq)]
+    struct TestVendorConfig {
+        #[serde(default)]
+        api_token: String,
+        #[serde(default)]
+        api_url: String,
+    }
+
+    #[test]
+    fn test_vendor_section_parses_from_yaml() {
+        let yaml = r#"
+server:
+  home_dir: "~/.test_vendor"
+vendor:
+  acme:
+    api_token: "acme-token-123"
+    api_url: "https://acme.example.com"
+  other_corp:
+    api_token: "other-token-789"
+    api_url: "https://other.example.com"
+"#;
+        let config: AppConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert_eq!(config.vendor.len(), 2);
+        assert!(config.vendor.contains_key("acme"));
+        assert!(config.vendor.contains_key("other_corp"));
+
+        let acme: TestVendorConfig = config.vendor_config("acme").unwrap();
+        assert_eq!(acme.api_token, "acme-token-123");
+        assert_eq!(acme.api_url, "https://acme.example.com");
+
+        let other: TestVendorConfig = config.vendor_config("other_corp").unwrap();
+        assert_eq!(other.api_token, "other-token-789");
+        assert_eq!(other.api_url, "https://other.example.com");
+    }
+
+    #[test]
+    fn test_vendor_section_defaults_to_empty() {
+        let config = AppConfig::default();
+        assert!(config.vendor.is_empty());
+    }
+
+    #[test]
+    fn test_vendor_config_typed_access() {
+        let mut config = AppConfig::default();
+        config.vendor.insert(
+            "acme".to_owned(),
+            serde_json::json!({
+                "api_token": "acme-token-123",
+                "api_url": "https://acme.example.com"
+            }),
+        );
+
+        let acme: TestVendorConfig = config.vendor_config("acme").unwrap();
+        assert_eq!(acme.api_token, "acme-token-123");
+        assert_eq!(acme.api_url, "https://acme.example.com");
+    }
+
+    #[test]
+    fn test_vendor_config_not_found() {
+        let config = AppConfig::default();
+        let result: Result<TestVendorConfig, _> = config.vendor_config("nonexistent");
+        assert!(matches!(
+            result,
+            Err(VendorConfigError::NotFound { ref vendor }) if vendor == "nonexistent"
+        ));
+    }
+
+    #[test]
+    fn test_vendor_config_invalid_structure() {
+        let mut config = AppConfig::default();
+        config
+            .vendor
+            .insert("bad".to_owned(), serde_json::json!("not an object"));
+
+        let result: Result<TestVendorConfig, _> = config.vendor_config("bad");
+        assert!(matches!(
+            result,
+            Err(VendorConfigError::InvalidConfig { ref vendor, .. }) if vendor == "bad"
+        ));
+    }
+
+    #[test]
+    fn test_vendor_config_or_default_missing() {
+        let config = AppConfig::default();
+        let acme: TestVendorConfig = config.vendor_config_or_default("acme").unwrap();
+        assert_eq!(acme, TestVendorConfig::default());
+    }
+
+    #[test]
+    fn test_vendor_config_or_default_present() {
+        let mut config = AppConfig::default();
+        config.vendor.insert(
+            "acme".to_owned(),
+            serde_json::json!({ "api_token": "acme-token-123" }),
+        );
+
+        let acme: TestVendorConfig = config.vendor_config_or_default("acme").unwrap();
+        assert_eq!(acme.api_token, "acme-token-123");
+    }
+
+    #[test]
+    fn test_vendor_config_env_override() {
+        let tmp = tempdir().unwrap();
+        let cfg_path = tmp.path().join("cfg.yaml");
+        let yaml = r#"
+server:
+  home_dir: "~/.test_vendor"
+vendor:
+  env_test_vendor:
+    api_token: "from_yaml"
+"#;
+        fs::write(&cfg_path, yaml).unwrap();
+
+        with_var(
+            "APP__VENDOR__ENV_TEST_VENDOR__API_TOKEN",
+            Some("from_env"),
+            || {
+                let config = AppConfig::load_layered(&cfg_path).unwrap();
+                let v: TestVendorConfig = config.vendor_config("env_test_vendor").unwrap();
+                assert_eq!(v.api_token, "from_env");
+            },
+        );
+    }
+
+    #[test]
+    fn test_vendor_multiple_vendors_typed_access() {
+        let mut config = AppConfig::default();
+        config.vendor.insert(
+            "acme".to_owned(),
+            serde_json::json!({ "api_token": "acme-token", "api_url": "https://acme.com" }),
+        );
+        config.vendor.insert(
+            "other_corp".to_owned(),
+            serde_json::json!({ "api_token": "other-token", "api_url": "https://other.com" }),
+        );
+
+        let acme: TestVendorConfig = config.vendor_config("acme").unwrap();
+        let other: TestVendorConfig = config.vendor_config("other_corp").unwrap();
+
+        assert_eq!(acme.api_token, "acme-token");
+        assert_eq!(other.api_token, "other-token");
+        assert_eq!(acme.api_url, "https://acme.com");
+        assert_eq!(other.api_url, "https://other.com");
+    }
+
+    #[test]
+    fn test_vendor_nested_config() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct NestedVendorConfig {
+            api_url: String,
+            feature_flags: FeatureFlags,
+        }
+
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct FeatureFlags {
+            beta_mode: bool,
+            max_retries: u32,
+        }
+
+        let mut config = AppConfig::default();
+        config.vendor.insert(
+            "acme".to_owned(),
+            serde_json::json!({
+                "api_url": "https://acme.com",
+                "feature_flags": {
+                    "beta_mode": true,
+                    "max_retries": 3
+                }
+            }),
+        );
+
+        let acme: NestedVendorConfig = config.vendor_config("acme").unwrap();
+        assert_eq!(acme.api_url, "https://acme.com");
+        assert!(acme.feature_flags.beta_mode);
+        assert_eq!(acme.feature_flags.max_retries, 3);
+    }
+
+    #[test]
+    fn test_vendor_config_or_default_invalid_returns_error() {
+        let mut config = AppConfig::default();
+        config
+            .vendor
+            .insert("bad".to_owned(), serde_json::json!("not an object"));
+
+        let result: Result<TestVendorConfig, _> = config.vendor_config_or_default("bad");
+        assert!(matches!(
+            result,
+            Err(VendorConfigError::InvalidConfig { ref vendor, .. }) if vendor == "bad"
+        ));
+    }
+
+    #[test]
+    fn test_vendor_config_yaml_roundtrip() {
+        let mut config = AppConfig::default();
+        config.vendor.insert(
+            "acme".to_owned(),
+            serde_json::json!({ "api_token": "acme-token-123" }),
+        );
+
+        let yaml = config.to_yaml().unwrap();
+        assert!(yaml.contains("vendor"));
+        assert!(yaml.contains("acme"));
+        assert!(yaml.contains("acme-token-123"));
+    }
+
+    #[test]
+    fn test_vendor_coexists_with_modules() {
+        let mut config = AppConfig::default();
+        config.modules.insert(
+            "my_module".to_owned(),
+            serde_json::json!({ "config": { "some_setting": true } }),
+        );
+        config.vendor.insert(
+            "acme".to_owned(),
+            serde_json::json!({ "api_token": "acme-token-123" }),
+        );
+
+        assert!(config.modules.contains_key("my_module"));
+        assert!(config.vendor.contains_key("acme"));
+
+        let acme: TestVendorConfig = config.vendor_config("acme").unwrap();
+        assert_eq!(acme.api_token, "acme-token-123");
+    }
+
+    #[test]
+    fn test_vendor_error_display_messages() {
+        let not_found = VendorConfigError::NotFound {
+            vendor: "acme".to_owned(),
+        };
+        assert_eq!(
+            not_found.to_string(),
+            "vendor 'acme' not found in configuration"
+        );
+
+        let invalid = VendorConfigError::InvalidConfig {
+            vendor: "bad".to_owned(),
+            source: serde_json::from_str::<TestVendorConfig>("invalid").unwrap_err(),
+        };
+        let msg = invalid.to_string();
+        assert!(msg.starts_with("invalid config for vendor 'bad':"));
+    }
+
+    #[test]
+    fn test_vendor_empty_object_in_yaml() {
+        let yaml = r#"
+server:
+  home_dir: "~/.test_vendor"
+vendor: {}
+"#;
+        let config: AppConfig = serde_saphyr::from_str(yaml).unwrap();
+        assert!(config.vendor.is_empty());
     }
 }
 

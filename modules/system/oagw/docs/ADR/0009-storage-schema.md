@@ -6,6 +6,53 @@ decision-makers: OAGW Team
 
 # Storage Schema — Portable Relational Baseline with JSON Blobs
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Core Tables](#core-tables)
+  - [Non-Negotiable Invariants](#non-negotiable-invariants)
+  - [Cascading Delete Semantics (FK Constraints)](#cascading-delete-semantics-fk-constraints)
+  - [Secure ORM Scoping Requirements](#secure-orm-scoping-requirements)
+  - [Plugin Reference Semantics](#plugin-reference-semantics)
+  - [Application-Level Validation Rules](#application-level-validation-rules)
+  - [Route Selection Determinism](#route-selection-determinism)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Portable relational baseline + JSON blobs](#portable-relational-baseline--json-blobs)
+  - [PostgreSQL-first schema](#postgresql-first-schema)
+  - [Fully normalized (no JSON)](#fully-normalized-no-json)
+- [Rationale](#rationale)
+- [Appendix A: Schema Tables (Illustrative)](#appendix-a-schema-tables-illustrative)
+  - [`oagw_upstream`](#oagwupstream)
+  - [`oagw_upstream_tag`](#oagwupstreamtag)
+  - [`oagw_route`](#oagwroute)
+  - [`oagw_route_http_match`](#oagwroutehttpmatch)
+  - [`oagw_route_method`](#oagwroutemethod)
+  - [`oagw_route_grpc_match`](#oagwroutegrpcmatch)
+  - [`oagw_route_tag`](#oagwroutetag)
+  - [`oagw_plugin` (custom plugins)](#oagwplugin-custom-plugins)
+  - [`oagw_upstream_plugin`](#oagwupstreamplugin)
+  - [`oagw_route_plugin`](#oagwrouteplugin)
+- [Appendix B: Example Queries (Illustrative)](#appendix-b-example-queries-illustrative)
+  - [Resolve upstream by alias across a tenant hierarchy](#resolve-upstream-by-alias-across-a-tenant-hierarchy)
+  - [Match HTTP route by (method, longest path prefix, priority)](#match-http-route-by-method-longest-path-prefix-priority)
+  - [Match gRPC route by (service, method, priority)](#match-grpc-route-by-service-method-priority)
+  - [Check whether a custom plugin UUID is in use](#check-whether-a-custom-plugin-uuid-is-in-use)
+  - [Mark a plugin eligible for GC when unreferenced](#mark-a-plugin-eligible-for-gc-when-unreferenced)
+  - [Delete plugins past GC TTL (still unreferenced)](#delete-plugins-past-gc-ttl-still-unreferenced)
+- [Appendix C: Plugin Binding Examples (Illustrative)](#appendix-c-plugin-binding-examples-illustrative)
+  - [Plugin Reference in API Payloads](#plugin-reference-in-api-payloads)
+  - [Plugin Bindings in the Database](#plugin-bindings-in-the-database)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-storage-schema`
 
 ## Context and Problem Statement

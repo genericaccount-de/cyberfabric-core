@@ -289,7 +289,7 @@ before requesting human review:
 cypilot review PR <number>
 ```
 
-Use any supported IDE agent (Windsurf, Cursor, Claude, Copilot) — each redirects to the canonical workflows in `.cypilot/workflows/`.
+Use any supported IDE agent (Windsurf, Cursor, Claude, Copilot) — each redirects to the canonical workflows via `/cypilot-pr-review` and `/cypilot-pr-status` commands.
 
 You can also check the PR status (unreplied comments, severity, etc.):
 

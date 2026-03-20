@@ -46,7 +46,7 @@ pub struct VacuumSql {
 /// the SELECT returns rows ordered by `id`, and the sequencer assigns
 /// sequences in that order before deleting.
 pub struct ClaimSql {
-    /// SELECT query that returns `id, body_id, created_at` ordered by `id`.
+    /// SELECT query that returns `id, body_id` ordered by `id`.
     /// Pg/MySQL append `FOR UPDATE`; `SQLite` omits it (no row locking).
     pub select: String,
 }
@@ -183,10 +183,11 @@ impl Dialect {
         sql
     }
 
-    /// Build `SELECT id, payload, payload_type FROM modkit_outbox_body WHERE id IN (...)`.
+    /// Build `SELECT id, payload, payload_type, created_at FROM modkit_outbox_body WHERE id IN (...)`.
     pub fn build_read_body_batch(self, count: usize) -> String {
-        let mut sql =
-            String::from("SELECT id, payload, payload_type FROM modkit_outbox_body WHERE id IN (");
+        let mut sql = String::from(
+            "SELECT id, payload, payload_type, created_at FROM modkit_outbox_body WHERE id IN (",
+        );
         self.append_in_placeholders(&mut sql, count);
         sql.push(')');
         sql
@@ -504,31 +505,33 @@ impl Dialect {
         match self {
             Self::Postgres => ClaimSql {
                 select: format!(
-                    "SELECT id, body_id, created_at \
+                    "SELECT id, body_id \
                      FROM modkit_outbox_incoming \
                      WHERE partition_id = $1 \
                      ORDER BY id \
                      LIMIT {batch_size} \
-                     FOR UPDATE"
+                     FOR UPDATE SKIP LOCKED"
                 ),
             },
             Self::Sqlite => ClaimSql {
                 select: format!(
-                    "SELECT id, body_id, created_at \
+                    "SELECT id, body_id \
                      FROM modkit_outbox_incoming \
                      WHERE partition_id = $1 \
                      ORDER BY id \
                      LIMIT {batch_size}"
                 ),
             },
+            // SKIP LOCKED prevents InnoDB gap-lock deadlocks when
+            // multiple sequencers claim from adjacent partitions.
             Self::MySql => ClaimSql {
                 select: format!(
-                    "SELECT id, body_id, created_at \
+                    "SELECT id, body_id \
                      FROM modkit_outbox_incoming \
                      WHERE partition_id = ? \
                      ORDER BY id \
                      LIMIT {batch_size} \
-                     FOR UPDATE"
+                     FOR UPDATE SKIP LOCKED"
                 ),
             },
         }
@@ -574,10 +577,9 @@ impl Dialect {
     }
 
     pub fn build_insert_outgoing_batch(self, count: usize) -> String {
-        let mut sql = String::from(
-            "INSERT INTO modkit_outbox_outgoing (partition_id, body_id, seq, created_at) VALUES ",
-        );
-        self.append_value_tuples(&mut sql, count, 4);
+        let mut sql =
+            String::from("INSERT INTO modkit_outbox_outgoing (partition_id, body_id, seq) VALUES ");
+        self.append_value_tuples(&mut sql, count, 3);
         sql
     }
 
@@ -647,14 +649,14 @@ impl Dialect {
     pub fn read_outgoing_batch(self, batch_size: u32) -> String {
         match self {
             Self::Postgres | Self::Sqlite => format!(
-                "SELECT id, body_id, seq, created_at \
+                "SELECT id, body_id, seq \
                  FROM modkit_outbox_outgoing \
                  WHERE partition_id = $1 AND seq > $2 \
                  ORDER BY seq \
                  LIMIT {batch_size}"
             ),
             Self::MySql => format!(
-                "SELECT id, body_id, seq, created_at \
+                "SELECT id, body_id, seq \
                  FROM modkit_outbox_outgoing \
                  WHERE partition_id = ? AND seq > ? \
                  ORDER BY seq \
@@ -1001,7 +1003,7 @@ mod tests {
     fn claim_pg_select_ordered_with_for_update() {
         let claim = Dialect::Postgres.claim_incoming(100);
         assert!(claim.select.contains("ORDER BY id"));
-        assert!(claim.select.contains("FOR UPDATE"));
+        assert!(claim.select.contains("FOR UPDATE SKIP LOCKED"));
         assert!(claim.select.contains("$1"));
     }
 
@@ -1016,7 +1018,7 @@ mod tests {
     fn claim_mysql_select_ordered_with_for_update() {
         let claim = Dialect::MySql.claim_incoming(100);
         assert!(claim.select.contains("ORDER BY id"));
-        assert!(claim.select.contains("FOR UPDATE"));
+        assert!(claim.select.contains("FOR UPDATE SKIP LOCKED"));
         assert!(claim.select.contains('?'));
     }
 
@@ -1109,7 +1111,7 @@ mod tests {
     fn build_read_body_batch_placeholders() {
         let pg = Dialect::Postgres.build_read_body_batch(3);
         assert!(pg.contains("$1, $2, $3"));
-        assert!(pg.contains("SELECT id, payload, payload_type"));
+        assert!(pg.contains("SELECT id, payload, payload_type, created_at"));
 
         let mysql = Dialect::MySql.build_read_body_batch(3);
         assert!(mysql.contains("?, ?, ?"));

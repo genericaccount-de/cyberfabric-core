@@ -6,6 +6,35 @@ decision-makers: OAGW Team
 
 # Circuit Breaker — Core Gateway Functionality with Redis-Based Distributed State
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [State Machine](#state-machine)
+  - [Configuration](#configuration)
+  - [Distributed State (Redis)](#distributed-state-redis)
+  - [Fallback Strategies](#fallback-strategies)
+  - [Integration with Error Handling](#integration-with-error-handling)
+  - [Error Response](#error-response)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Circuit breaker as core functionality](#circuit-breaker-as-core-functionality)
+  - [Circuit breaker as plugin](#circuit-breaker-as-plugin)
+  - [No circuit breaker (client responsibility)](#no-circuit-breaker-client-responsibility)
+  - [Health check based (proactive)](#health-check-based-proactive)
+- [More Information](#more-information)
+  - [Hierarchical Configuration](#hierarchical-configuration)
+  - [Observability and Metrics](#observability-and-metrics)
+  - [Implementation Notes](#implementation-notes)
+  - [References](#references)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-circuit-breaker`
 
 ## Context and Problem Statement

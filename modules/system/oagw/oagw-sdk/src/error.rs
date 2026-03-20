@@ -50,6 +50,15 @@ pub enum ServiceGatewayError {
     #[error("{detail}")]
     RequestTimeout { detail: String, instance: String },
 
+    /// A guard plugin rejected the request.
+    #[error("guard rejected: {detail}")]
+    GuardRejected {
+        status: u16,
+        error_code: String,
+        detail: String,
+        instance: String,
+    },
+
     /// The caller is authenticated but not authorized to perform the requested action.
     #[error("access forbidden: {detail}")]
     Forbidden { detail: String },

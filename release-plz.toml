@@ -264,7 +264,3 @@ name = "cf-mini-chat"
 changelog_update = false
 git_release_enable = false
 
-[[package]]
-name = "cf-static-mini-chat-audit-plugin"
-changelog_update = false
-git_release_enable = false

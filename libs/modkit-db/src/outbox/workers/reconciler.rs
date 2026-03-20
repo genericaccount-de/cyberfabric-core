@@ -53,7 +53,7 @@ pub async fn reconcile_dirty(outbox: &Outbox, db: &Db, prioritizer: &SharedPrior
 
 /// Cold reconciler as a `WorkerAction` — periodically discovers pending
 /// partitions from the incoming table, populates the dirty set, and
-/// wakes the sequencer. Driven by `WorkerBuilder::with_poker(interval)`.
+/// wakes the sequencer. Driven by `WorkerBuilder::pacing(idle_interval)`.
 pub struct ColdReconciler {
     pub outbox: Arc<Outbox>,
     pub db: Db,

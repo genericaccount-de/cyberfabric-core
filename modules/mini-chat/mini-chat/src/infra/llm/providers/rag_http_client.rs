@@ -8,9 +8,9 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use modkit_security::SecurityContext;
+use oagw_sdk::multipart::{MultipartBody, Part};
 use oagw_sdk::{Body, ServiceGatewayClientV1};
 use serde::de::DeserializeOwned;
-use uuid::Uuid;
 
 use crate::domain::ports::{FileStorageError, UploadFileParams};
 
@@ -30,58 +30,75 @@ impl RagHttpClient {
 
     /// Upload a file via multipart/form-data POST.
     ///
-    /// Builds the multipart body with `params.purpose` and file content,
-    /// sends to `uri`, and parses the JSON response to extract `id`.
+    /// Collects the `FileStream` into bytes, then uses `Part::bytes` to build
+    /// a buffered multipart body with `Content-Length`. The handler already
+    /// collected chunks for size enforcement, so this is a move (not a copy)
+    /// from the handler's `Vec<Bytes>` into the multipart body.
+    ///
+    /// True streaming via `Part::stream` is blocked by OAGW chunked encoding
+    /// issues (premature connection close before termination chunk). Once OAGW
+    /// stabilizes chunked request body support, this can switch to `Part::stream`.
+    ///
+    /// Returns `(provider_file_id, bytes_uploaded)`.
     pub async fn multipart_upload(
         &self,
         ctx: SecurityContext,
         uri: &str,
-        params: &UploadFileParams,
-    ) -> Result<String, FileStorageError> {
+        params: UploadFileParams,
+    ) -> Result<(String, u64), FileStorageError> {
+        use futures::StreamExt;
+
         #[derive(serde::Deserialize)]
         struct FileObject {
             id: String,
         }
-        let boundary = format!("----boundary{}", Uuid::now_v7().as_simple());
-        let mut body_buf = Vec::new();
 
-        // purpose field
-        body_buf.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-        body_buf.extend_from_slice(
-            format!(
-                "Content-Disposition: form-data; name=\"purpose\"\r\n\r\n{}\r\n",
-                params.purpose
-            )
-            .as_bytes(),
+        // Collect stream into bytes.
+        // The stream may yield `multer::Error::FieldSizeExceeded` from the
+        // handler's size constraints — propagate as Rejected so the domain
+        // layer maps it to FileTooLarge (413), not ProviderError (502).
+        let mut file_buf = Vec::new();
+        let mut stream = params.file_stream;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk.map_err(|e| {
+                if e.downcast_ref::<multer::Error>().is_some_and(|me| {
+                    matches!(
+                        me,
+                        multer::Error::FieldSizeExceeded { .. }
+                            | multer::Error::StreamSizeExceeded { .. }
+                    )
+                }) {
+                    FileStorageError::Rejected {
+                        code: "file_too_large".to_owned(),
+                        message: e.to_string(),
+                    }
+                } else {
+                    FileStorageError::Unavailable {
+                        message: format!("file stream error: {e}"),
+                    }
+                }
+            })?;
+            file_buf.extend_from_slice(&chunk);
+        }
+        let bytes_uploaded = file_buf.len() as u64;
+
+        tracing::debug!(bytes_uploaded, uri, "multipart upload: building request");
+
+        let multipart = MultipartBody::new().text("purpose", params.purpose).part(
+            Part::bytes("file", file_buf)
+                .filename(params.filename)
+                .content_type(params.content_type),
         );
 
-        // file field
-        // SAFETY: filename is produced by structured_filename() — UUID hex + static ext,
-        // no user input. No header injection risk (no quotes, CR, LF possible).
-        body_buf.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
-        body_buf.extend_from_slice(
-            format!(
-                "Content-Disposition: form-data; name=\"file\"; filename=\"{}\"\r\nContent-Type: {}\r\n\r\n",
-                params.filename, params.content_type
-            )
-            .as_bytes(),
-        );
-        body_buf.extend_from_slice(&params.file_bytes);
-        body_buf.extend_from_slice(b"\r\n");
-        body_buf.extend_from_slice(format!("--{boundary}--\r\n").as_bytes());
-
-        let req = http::Request::builder()
-            .method(http::Method::POST)
-            .uri(uri)
-            .header(
-                http::header::CONTENT_TYPE,
-                format!("multipart/form-data; boundary={boundary}"),
-            )
-            .header(http::header::ACCEPT, "application/json")
-            .body(Body::Bytes(Bytes::from(body_buf)))
+        let mut req = multipart
+            .into_request(http::Method::POST, uri)
             .map_err(|e| FileStorageError::Configuration {
                 message: format!("failed to build file upload request: {e}"),
             })?;
+        req.headers_mut().insert(
+            http::header::ACCEPT,
+            http::HeaderValue::from_static("application/json"),
+        );
 
         let bytes = self.send(ctx, req, "file upload").await?;
 
@@ -90,7 +107,7 @@ impl RagHttpClient {
                 message: format!("failed to parse upload response: {e}"),
             })?;
 
-        Ok(file_obj.id)
+        Ok((file_obj.id, bytes_uploaded))
     }
 
     /// Send a JSON POST and parse the typed response.

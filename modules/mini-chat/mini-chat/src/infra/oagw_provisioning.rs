@@ -80,20 +80,31 @@ pub async fn register_oagw_upstreams(
 /// auto-derives the alias.
 ///
 /// Returns `None` (with a warning log) if registration fails.
+fn endpoint_for(entry: &ProviderEntry) -> oagw_sdk::Endpoint {
+    use oagw_sdk::{Endpoint, Scheme};
+    let scheme = if entry.use_http {
+        Scheme::Http
+    } else {
+        Scheme::Https
+    };
+    let port = entry.port.unwrap_or(if entry.use_http { 80 } else { 443 });
+    Endpoint {
+        scheme,
+        host: entry.host.clone(),
+        port,
+    }
+}
+
 async fn create_upstream(
     gateway: &Arc<dyn ServiceGatewayClientV1>,
     ctx: &modkit_security::SecurityContext,
     provider_id: &str,
     entry: &ProviderEntry,
 ) -> Option<oagw_sdk::Upstream> {
-    use oagw_sdk::{AuthConfig, CreateUpstreamRequest, Endpoint, Scheme, Server};
+    use oagw_sdk::{AuthConfig, CreateUpstreamRequest, Server};
 
     let server = Server {
-        endpoints: vec![Endpoint {
-            scheme: Scheme::Https,
-            host: entry.host.clone(),
-            port: 443,
-        }],
+        endpoints: vec![endpoint_for(entry)],
     };
 
     let mut builder =
@@ -149,16 +160,16 @@ async fn create_tenant_upstream(
     entry: &ProviderEntry,
     tenant_id: &str,
 ) -> Option<String> {
-    use oagw_sdk::{AuthConfig, CreateUpstreamRequest, Endpoint, Scheme, Server};
+    use oagw_sdk::{AuthConfig, CreateUpstreamRequest, Server};
 
     let host = entry.effective_host_for_tenant(tenant_id);
 
+    // Inherit scheme/port from root entry (tenant override only changes host/auth).
+    let mut ep = endpoint_for(entry);
+    host.clone_into(&mut ep.host);
+
     let server = Server {
-        endpoints: vec![Endpoint {
-            scheme: Scheme::Https,
-            host: host.to_owned(),
-            port: 443,
-        }],
+        endpoints: vec![ep],
     };
 
     let mut builder =

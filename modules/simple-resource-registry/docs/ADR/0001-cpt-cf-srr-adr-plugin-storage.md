@@ -4,6 +4,24 @@ date: 2026-02-24
 ---
 # ADR-0001: Plugin-Based Multi-Backend Storage Architecture
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Single monolithic storage implementation](#single-monolithic-storage-implementation)
+  - [Plugin-based architecture with GTS-based discovery](#plugin-based-architecture-with-gts-based-discovery)
+  - [Abstract storage interface without runtime discovery](#abstract-storage-interface-without-runtime-discovery)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-srr-adr-plugin-storage`
 
 ## Context and Problem Statement

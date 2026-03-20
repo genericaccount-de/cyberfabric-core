@@ -198,14 +198,21 @@ pub enum RateLimitStrategy {
 }
 
 // ---------------------------------------------------------------------------
-// PluginsConfig
+// PluginBinding / PluginsConfig
 // ---------------------------------------------------------------------------
+
+#[domain_model]
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginBinding {
+    pub plugin_ref: String,
+    pub config: HashMap<String, String>,
+}
 
 #[domain_model]
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PluginsConfig {
     pub sharing: SharingMode,
-    pub items: Vec<String>,
+    pub items: Vec<PluginBinding>,
 }
 
 // ---------------------------------------------------------------------------

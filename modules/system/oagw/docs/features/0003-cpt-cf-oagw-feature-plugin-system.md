@@ -1,5 +1,51 @@
 # Feature: Plugin System
 
+
+<!-- toc -->
+
+- [1. Feature Context](#1-feature-context)
+  - [1.1 Overview](#11-overview)
+  - [1.2 Purpose](#12-purpose)
+  - [1.3 Actors](#13-actors)
+  - [1.4 References](#14-references)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
+  - [Create Custom Plugin Flow](#create-custom-plugin-flow)
+  - [List and Get Plugin Flow](#list-and-get-plugin-flow)
+  - [Delete Custom Plugin Flow](#delete-custom-plugin-flow)
+  - [Bind Plugin to Upstream or Route Flow](#bind-plugin-to-upstream-or-route-flow)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
+  - [Plugin Ref Resolution Algorithm](#plugin-ref-resolution-algorithm)
+  - [Plugin Validation Algorithm](#plugin-validation-algorithm)
+  - [Plugin In-Use Check Algorithm](#plugin-in-use-check-algorithm)
+  - [Plugin GC Marking Algorithm](#plugin-gc-marking-algorithm)
+  - [Plugin GC Cleanup Algorithm](#plugin-gc-cleanup-algorithm)
+- [4. States (CDSL)](#4-states-cdsl)
+  - [Custom Plugin Lifecycle State Machine](#custom-plugin-lifecycle-state-machine)
+- [5. Definitions of Done](#5-definitions-of-done)
+  - [Implement Plugin Trait Definitions](#implement-plugin-trait-definitions)
+  - [Implement All 11 Built-in Plugins](#implement-all-11-built-in-plugins)
+  - [Implement Plugin CRUD REST Handlers](#implement-plugin-crud-rest-handlers)
+  - [Implement Plugin Identification Model](#implement-plugin-identification-model)
+  - [Implement Starlark Sandbox](#implement-starlark-sandbox)
+  - [Implement Plugin Garbage Collection](#implement-plugin-garbage-collection)
+- [6. Acceptance Criteria](#6-acceptance-criteria)
+- [7. Additional Context](#7-additional-context)
+  - [Auth Plugin Credential Resolution](#auth-plugin-credential-resolution)
+  - [Scope Boundaries](#scope-boundaries)
+  - [Performance Considerations](#performance-considerations)
+  - [Usability Considerations](#usability-considerations)
+  - [Compliance Considerations](#compliance-considerations)
+  - [Audit Trail](#audit-trail)
+  - [Observability](#observability)
+  - [Fault Tolerance](#fault-tolerance)
+  - [Component Interactions](#component-interactions)
+  - [Configuration Parameters](#configuration-parameters)
+  - [Known Limitations](#known-limitations)
+  - [Test Guidance](#test-guidance)
+  - [Rollout & Rollback](#rollout--rollback)
+
+<!-- /toc -->
+
 - [ ] `p1` - **ID**: `cpt-cf-oagw-featstatus-plugin-system-implemented`
 
 <!-- reference to DECOMPOSITION entry -->

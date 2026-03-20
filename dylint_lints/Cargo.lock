@@ -201,15 +201,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "atomic-polyfill"
-version = "1.0.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8cf2bce30dfe09ef0bfaef228b9d414faaf7e563035494d7fe092dba54b300f4"
-dependencies = [
- "critical-section",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -527,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit"
-version = "0.5.0"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -573,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-db"
-version = "0.5.0"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -603,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-db-macros"
-version = "0.5.0"
+version = "0.5.7"
 dependencies = [
  "heck 0.5.0",
  "proc-macro-error2",
@@ -614,7 +605,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-errors"
-version = "0.5.0"
+version = "0.5.7"
 dependencies = [
  "axum 0.8.8",
  "http",
@@ -625,7 +616,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-errors-macro"
-version = "0.5.0"
+version = "0.5.7"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -636,7 +627,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-macros"
-version = "0.5.0"
+version = "0.5.7"
 dependencies = [
  "heck 0.5.0",
  "proc-macro2",
@@ -647,16 +638,17 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-odata"
-version = "0.5.0"
+version = "0.5.7"
 dependencies = [
  "base64",
  "bigdecimal",
  "cf-modkit-errors",
  "cf-modkit-errors-macro",
  "chrono",
+ "chrono-tz",
  "hex",
  "http",
- "odata-params",
+ "peg",
  "serde",
  "serde_json",
  "sha2",
@@ -666,7 +658,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-sdk"
-version = "0.5.0"
+version = "0.5.7"
 dependencies = [
  "cf-modkit-odata",
  "cf-modkit-security",
@@ -676,7 +668,7 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-security"
-version = "0.5.0"
+version = "0.5.7"
 dependencies = [
  "anyhow",
  "postcard",
@@ -688,17 +680,18 @@ dependencies = [
 
 [[package]]
 name = "cf-modkit-utils"
-version = "0.5.0"
+version = "0.5.7"
 dependencies = [
  "humantime",
  "regex",
+ "secrecy",
  "serde",
  "zeroize",
 ]
 
 [[package]]
 name = "cf-system-sdk-directory"
-version = "0.1.21"
+version = "0.1.26"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -706,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "cf-system-sdks"
-version = "0.1.21"
+version = "0.1.26"
 dependencies = [
  "cf-system-sdk-directory",
 ]
@@ -730,10 +723,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fac4744fb15ae8337dc853fee7fb3f4e48c0fbaa23d0afe49c447b4fab126118"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -862,12 +853,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "critical-section"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
-
-[[package]]
 name = "crossbeam-queue"
 version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -947,6 +932,69 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
+name = "de0101_no_serde_in_contract"
+version = "0.1.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "lint_utils",
+ "serde",
+]
+
+[[package]]
+name = "de0102_no_toschema_in_contract"
+version = "0.1.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "lint_utils",
+ "utoipa",
+]
+
+[[package]]
+name = "de0103_no_http_types_in_contract"
+version = "0.1.0"
+dependencies = [
+ "axum 0.7.9",
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "http",
+ "lint_utils",
+]
+
+[[package]]
+name = "de0104_no_api_dto_in_contract"
+version = "0.1.0"
+dependencies = [
+ "cf-modkit",
+ "cf-modkit-macros",
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "lint_utils",
+ "serde",
+ "utoipa",
+]
+
+[[package]]
+name = "de0110_no_schema_for_on_gts_structs"
+version = "0.1.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "gts",
+ "gts-macros",
+ "lint_utils",
+ "schemars",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "de0201_dtos_only_in_api_rest"
 version = "0.1.0"
 dependencies = [
@@ -987,6 +1035,18 @@ dependencies = [
  "lint_utils",
  "serde",
  "utoipa",
+]
+
+[[package]]
+name = "de0205_operation_builder"
+version = "0.1.0"
+dependencies = [
+ "cf-modkit",
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "lint_utils",
+ "tokio",
 ]
 
 [[package]]
@@ -1065,6 +1125,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "de0707_drop_zeroize"
+version = "0.1.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "lint_utils",
+]
+
+[[package]]
 name = "de0801_api_endpoint_version"
 version = "0.1.0"
 dependencies = [
@@ -1134,6 +1204,18 @@ dependencies = [
  "dylint_testing",
  "lint_utils",
  "tokio",
+]
+
+[[package]]
+name = "de1303_no_primitive_type_alias"
+version = "0.1.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+ "lint_utils",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]
@@ -1756,9 +1838,9 @@ checksum = "0cc23270f6e1808e30a928bdc84dea0b9b4136a8bc82338574f23baf47bbd280"
 
 [[package]]
 name = "gts"
-version = "0.8.2"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce6f5841b1df050923040aeb9574cdd232eaba91e64202e1c37a00cea9175a76"
+checksum = "3cf70de49935aad158ecc91b335a5e1361757a7048417a26e19bd72b2d5bb44d"
 dependencies = [
  "gts-id",
  "jsonschema",
@@ -1775,18 +1857,18 @@ dependencies = [
 
 [[package]]
 name = "gts-id"
-version = "0.8.2"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e872c9c5344cd49f705d8a82f4d35dd952146f0df88e7b10e6e3ee5eab526d4"
+checksum = "b2d137decd946d1034f918cb972069ca22928fe8416348dbbb142b9d4a5eb922"
 dependencies = [
  "thiserror 2.0.18",
 ]
 
 [[package]]
 name = "gts-macros"
-version = "0.8.2"
+version = "0.8.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36248d3c70926565f362c82ddfa44485d9ea553b7a4698acf808df784b960be4"
+checksum = "d9140ff93e4f92f38ce91c47a3b7b27df6d581d05d94e435cb31ce91ee4fb391"
 dependencies = [
  "gts-id",
  "proc-macro2",
@@ -1812,15 +1894,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
-]
-
-[[package]]
-name = "hash32"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0c35f58762feb77d74ebe43bdbc3210f09be9fe6742234d573bacc26ed92b67"
-dependencies = [
- "byteorder",
 ]
 
 [[package]]
@@ -1867,20 +1940,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
 dependencies = [
  "hashbrown 0.15.5",
-]
-
-[[package]]
-name = "heapless"
-version = "0.7.17"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cdc6457c0eb62c71aac4bc17216026d8410337c4126773b9c5daba343f17964f"
-dependencies = [
- "atomic-polyfill",
- "hash32",
- "rustc_version",
- "serde",
- "spin",
- "stable_deref_trait",
 ]
 
 [[package]]
@@ -2688,20 +2747,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "odata-params"
-version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d32ae3978a6fc4114aec5b7907038efa81452336845a98a1e2ec957c8f32ade6"
-dependencies = [
- "bigdecimal",
- "chrono",
- "chrono-tz",
- "peg",
- "thiserror 1.0.69",
- "uuid",
-]
-
-[[package]]
 name = "once_cell"
 version = "1.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3091,7 +3136,6 @@ dependencies = [
  "cobs",
  "embedded-io 0.4.0",
  "embedded-io 0.6.1",
- "heapless",
  "serde",
 ]
 

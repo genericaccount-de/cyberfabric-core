@@ -6,6 +6,29 @@ decision-makers: OAGW Team
 
 # gRPC Support — HTTP/2 Multiplexing with Content-Type Detection
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [gRPC Route Matching](#grpc-route-matching)
+  - [gRPC Error Mapping](#grpc-error-mapping)
+  - [All Streaming Patterns Supported *(Phase 3 — not yet implemented)*](#all-streaming-patterns-supported-phase-3--not-yet-implemented)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Separate port](#separate-port)
+  - [Connection hijacking](#connection-hijacking)
+  - [HTTP/2 with gRPC multiplexing](#http2-with-grpc-multiplexing)
+- [Comparison Matrix](#comparison-matrix)
+- [More Information](#more-information)
+- [Links](#links)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-grpc-support`
 
 ## Context and Problem Statement

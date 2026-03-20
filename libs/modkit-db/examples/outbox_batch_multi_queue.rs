@@ -14,7 +14,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use modkit_db::outbox::{
-    Handler, HandlerResult, MessageHandler, Outbox, OutboxMessage, Partitions, outbox_migrations,
+    Handler, HandlerResult, MessageHandler, Outbox, OutboxMessage, Partitions, WorkerTuning,
+    outbox_migrations,
 };
 use modkit_db::{ConnectOpts, connect_db, migration_runner::run_migrations_for_testing};
 
@@ -70,10 +71,14 @@ async fn main() -> anyhow::Result<()> {
     let notif_count = Arc::new(AtomicUsize::new(0));
 
     let handle = Outbox::builder(db.clone())
-        .poll_interval(Duration::from_millis(50))
+        .processor_tuning(
+            WorkerTuning::processor_default().idle_interval(Duration::from_millis(50)),
+        )
+        .sequencer_tuning(
+            WorkerTuning::sequencer_default().idle_interval(Duration::from_millis(50)),
+        )
         // orders: 2 partitions for parallelism, batch handler processes up to 5 at once
         .queue("orders", Partitions::of(2))
-        .msg_batch_size(5)
         .batch_decoupled(OrderBatchHandler {
             count: order_count.clone(),
         })

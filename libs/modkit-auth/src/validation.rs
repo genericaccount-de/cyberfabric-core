@@ -14,6 +14,10 @@ pub struct ValidationConfig {
 
     /// Leeway in seconds for time-based validations (exp, nbf)
     pub leeway_seconds: i64,
+
+    /// Whether the `exp` claim is required (default: `true`).
+    /// Set to `false` to allow tokens without an expiration claim.
+    pub require_exp: bool,
 }
 
 impl Default for ValidationConfig {
@@ -22,6 +26,7 @@ impl Default for ValidationConfig {
             allowed_issuers: vec![],
             allowed_audiences: vec![],
             leeway_seconds: 60,
+            require_exp: true,
         }
     }
 }
@@ -31,7 +36,8 @@ impl Default for ValidationConfig {
 /// Checks performed:
 /// 1. **Issuer** (`iss`) — must match one of `config.allowed_issuers` (skipped if empty)
 /// 2. **Audience** (`aud`) — at least one must match `config.allowed_audiences` (skipped if empty)
-/// 3. **Expiration** (`exp`) — must not be in the past (with leeway)
+/// 3. **Expiration** (`exp`) — required by default; must not be in the past (with leeway).
+///    Set `require_exp = false` to accept tokens without an `exp` claim.
 /// 4. **Not Before** (`nbf`) — must not be in the future (with leeway)
 ///
 /// # Errors
@@ -101,6 +107,8 @@ pub fn validate_claims(
         if now > exp_with_leeway {
             return Err(ClaimsError::Expired);
         }
+    } else if config.require_exp {
+        return Err(ClaimsError::MissingClaim(StandardClaim::EXP.to_owned()));
     }
 
     // 4. Validate not-before with leeway
@@ -331,6 +339,7 @@ mod tests {
     fn test_not_yet_valid_fails() {
         let now = time::OffsetDateTime::now_utc();
         let claims = json!({
+            "exp": (now + time::Duration::hours(2)).unix_timestamp(),
             "nbf": (now + time::Duration::hours(1)).unix_timestamp(),
         });
         let config = ValidationConfig::default();
@@ -354,15 +363,45 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_config_accepts_anything() {
-        let claims = json!({ "sub": "anyone", "iss": "any-issuer" });
+    fn test_default_config_accepts_valid_claims_with_exp() {
+        let now = time::OffsetDateTime::now_utc();
+        let claims = json!({
+            "sub": "anyone",
+            "iss": "any-issuer",
+            "exp": (now + time::Duration::hours(1)).unix_timestamp(),
+        });
         let config = ValidationConfig::default();
         assert!(validate_claims(&claims, &config).is_ok());
     }
 
     #[test]
+    fn test_missing_exp_fails() {
+        let claims = json!({ "sub": "user-1" });
+        let config = ValidationConfig::default();
+        let err = validate_claims(&claims, &config).unwrap_err();
+        match err {
+            ClaimsError::MissingClaim(claim) => assert_eq!(claim, StandardClaim::EXP),
+            other => panic!("expected MissingClaim(exp), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_missing_exp_allowed_when_not_required() {
+        let claims = json!({ "sub": "service-token", "iss": "internal" });
+        let config = ValidationConfig {
+            require_exp: false,
+            ..Default::default()
+        };
+        assert!(validate_claims(&claims, &config).is_ok());
+    }
+
+    #[test]
     fn test_audience_array_match() {
-        let claims = json!({ "aud": ["api", "frontend"] });
+        let now = time::OffsetDateTime::now_utc();
+        let claims = json!({
+            "aud": ["api", "frontend"],
+            "exp": (now + time::Duration::hours(1)).unix_timestamp(),
+        });
         let config = ValidationConfig {
             allowed_audiences: vec!["api".to_owned()],
             ..Default::default()
@@ -459,7 +498,11 @@ mod tests {
 
     #[test]
     fn test_nbf_overflow_returns_error() {
-        let claims = json!({ "nbf": MIN_UNIX_TIMESTAMP });
+        let now = time::OffsetDateTime::now_utc();
+        let claims = json!({
+            "exp": (now + time::Duration::hours(1)).unix_timestamp(),
+            "nbf": MIN_UNIX_TIMESTAMP,
+        });
         let config = ValidationConfig {
             leeway_seconds: 60,
             ..Default::default()

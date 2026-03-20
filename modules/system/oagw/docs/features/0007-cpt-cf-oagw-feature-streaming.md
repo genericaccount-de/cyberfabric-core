@@ -1,5 +1,35 @@
 # Feature: Streaming & Protocol Support
 
+
+<!-- toc -->
+
+- [1. Feature Context](#1-feature-context)
+  - [1.1 Overview](#11-overview)
+  - [1.2 Purpose](#12-purpose)
+  - [1.3 Actors](#13-actors)
+  - [1.4 References](#14-references)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
+  - [SSE Proxy Flow](#sse-proxy-flow)
+  - [WebSocket Proxy Flow](#websocket-proxy-flow)
+  - [WebTransport Proxy Flow](#webtransport-proxy-flow)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
+  - [HTTP Version Negotiation](#http-version-negotiation)
+  - [Streaming Connection Lifecycle](#streaming-connection-lifecycle)
+- [4. States (CDSL)](#4-states-cdsl)
+- [5. Definitions of Done](#5-definitions-of-done)
+  - [Implement SSE Streaming Proxy](#implement-sse-streaming-proxy)
+  - [Implement WebSocket Streaming Proxy](#implement-websocket-streaming-proxy)
+  - [Implement WebTransport Streaming Proxy](#implement-webtransport-streaming-proxy)
+  - [Implement HTTP Version Negotiation and Protocol Cache](#implement-http-version-negotiation-and-protocol-cache)
+- [6. Acceptance Criteria](#6-acceptance-criteria)
+- [7. Additional Context](#7-additional-context)
+  - [Performance Considerations](#performance-considerations)
+  - [Security Considerations](#security-considerations)
+  - [Configuration Parameters](#configuration-parameters)
+  - [Deliberate Omissions](#deliberate-omissions)
+
+<!-- /toc -->
+
 - [ ] `p2` - **ID**: `cpt-cf-oagw-featstatus-streaming-implemented`
 
 <!-- reference to DECOMPOSITION entry -->

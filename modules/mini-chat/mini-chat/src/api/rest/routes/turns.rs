@@ -5,6 +5,8 @@ use modkit::api::operation_builder::OperationBuilder;
 use super::AiChatLicense;
 use crate::api::rest::handlers;
 
+const API_TAG: &str = "Mini Chat Turns";
+
 pub(super) fn register_turn_routes(
     mut router: Router,
     openapi: &dyn OpenApiRegistry,
@@ -14,7 +16,7 @@ pub(super) fn register_turn_routes(
     router = OperationBuilder::get(format!("{prefix}/v1/chats/{{id}}/turns/{{request_id}}"))
         .operation_id("mini_chat.get_turn")
         .summary("Get a turn by request ID")
-        .tag("turns")
+        .tag(API_TAG)
         .authenticated()
         .require_license_features([&AiChatLicense])
         .path_param("id", "Chat UUID")
@@ -36,7 +38,7 @@ pub(super) fn register_turn_routes(
     ))
     .operation_id("mini_chat.retry_turn")
     .summary("Retry a failed turn")
-    .tag("turns")
+    .tag(API_TAG)
     .authenticated()
     .require_license_features([&AiChatLicense])
     .path_param("id", "Chat UUID")
@@ -50,7 +52,7 @@ pub(super) fn register_turn_routes(
     router = OperationBuilder::patch(format!("{prefix}/v1/chats/{{id}}/turns/{{request_id}}"))
         .operation_id("mini_chat.edit_turn")
         .summary("Edit a turn (user message)")
-        .tag("turns")
+        .tag(API_TAG)
         .authenticated()
         .require_license_features([&AiChatLicense])
         .path_param("id", "Chat UUID")
@@ -64,7 +66,7 @@ pub(super) fn register_turn_routes(
     router = OperationBuilder::delete(format!("{prefix}/v1/chats/{{id}}/turns/{{request_id}}"))
         .operation_id("mini_chat.delete_turn")
         .summary("Delete a turn")
-        .tag("turns")
+        .tag(API_TAG)
         .authenticated()
         .require_license_features([&AiChatLicense])
         .path_param("id", "Chat UUID")

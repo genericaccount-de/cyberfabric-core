@@ -1,6 +1,6 @@
 # ADR — Identified White Spots And Next ADRs Scope
 
-**Source:** Consistency review of `ADR_DOMAIN_MODEL_AND_APIS.md` against `PRD.md`
+**Source:** Consistency review of `DESIGN.md` against `PRD.md`
 **Date:** 2026-01-21
 **Updated:** 2026-02-08 (comprehensive consistency and coverage audit)
 
@@ -12,13 +12,13 @@
 
 | PRD ID | Requirement                                | Gap Description                                                                                                                                                                                                  | Severity    | New |
 |--------|--------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------|-----|
-| BR-006 | Execution identity context                 | No model for selecting execution identity (system / API client / user) per entrypoint; `SecurityContext` is passed through but entrypoint definitions have no field to declare or constrain which identity the execution runs under; critical for scheduled and event-triggered executions that have no real-time caller | **Blocker** | Yes |
+| BR-006 | Execution identity context                 | No model for selecting execution identity (system / API client / user) per function; `SecurityContext` is passed through but function definitions have no field to declare or constrain which identity the execution runs under; critical for scheduled and event-triggered executions that have no real-time caller | **Blocker** | Yes |
 | BR-025 | Secure handling of secrets                 | No `secret_ref` type or secret binding model for workflows to reference secrets                                                                                                                                  | **Blocker** |     |
-| BR-030 | Execution error boundaries                 | No error boundary mechanism to contain failures within specific workflow sections and prevent cascading failures; the PRD MUST requirement has no corresponding domain concept                                     | **Blocker** | Yes |
+| BR-030 | Execution error boundaries                 | No error boundary mechanism to contain failures within specific workflow sections and prevent cascading failures; the PRD's mandatory requirement has no corresponding domain concept                                     | **Blocker** | Yes |
 | BR-038 | Injection attack prevention                | No input sanitization rules or validation constraints in schema definitions                                                                                                                                      | **Blocker** |     |
 | BR-039 | Privilege escalation prevention            | No privilege scope constraints or execution identity validation model                                                                                                                                            | **Blocker** |     |
 | BR-008 | Runtime capabilities (HTTP, events, audit) | No SDK/capability interface for workflow authors to invoke platform services                                                                                                                                      | High        |     |
-| BR-009 | Durability / suspension policy             | `max_suspension_days` exists on entrypoint but PRD requires tenant-level configurable suspension policy with three handling options (auto-cancel with notification, indefinite suspension, escalation); `TenantRuntimePolicy` lacks this; state machine only shows `suspended → failed` on timeout | High        | Yes |
+| BR-009 | Durability / suspension policy             | `max_suspension_days` exists on function but PRD requires tenant-level configurable suspension policy with three handling options (auto-cancel with notification, indefinite suspension, escalation); `TenantRuntimePolicy` lacks this; state machine only shows `suspended → failed` on timeout | High        | Yes |
 | BR-013 | Long-running credential refresh            | No model for token refresh or credential lifecycle in security context                                                                                                                                           | High        |     |
 | BR-017 | Data protection and privacy controls       | No sensitive field annotations, data classification model, or controls for restricting who can view sensitive inputs/outputs in execution history; broader requirement than BR-025 (secrets)                       | High        | Yes |
 | BR-023 | Audit log integrity                        | No model for protecting audit records from unauthorized modification/deletion or ensuring availability within configured retention period                                                                          | High        | Yes |
@@ -32,7 +32,7 @@
 | PRD ID | Requirement                                     | Gap Description                                                                                         | New |
 |--------|-------------------------------------------------|---------------------------------------------------------------------------------------------------------|-----|
 | BR-123 | Extensible sharing                              | `OwnerRef` defines default visibility but no sharing mechanism or extension point for cross-user/group/tenant sharing | Yes |
-| BR-136 | Graceful disconnection handling                 | No adapter health model or API for rejecting starts when adapter disconnected                           |     |
+| BR-136 | Graceful disconnection handling (promoted to P0) | No adapter health model or API for rejecting starts when adapter disconnected                           |     |
 | BR-101 | Debugging with breakpoints                      | No debugging API or breakpoint model                                                                    |     |
 | BR-102 | Step-through execution                          | No step-through control model                                                                           |     |
 | BR-104 | Child workflows / modular composition           | No parent-child invocation relationship model                                                           |     |
@@ -70,10 +70,10 @@
 
 **Scope:**
 
-- Execution identity model: how entrypoints declare and constrain execution context (system / API client / user);
+- Execution identity model: how functions declare and constrain execution context (system / API client / user);
   how scheduled and event-triggered executions resolve identity (BR-006)
 - Credential lifecycle and token refresh model for long-running workflows (BR-013)
-- Secret reference model (`secret_ref` type) and secret binding for entrypoints (BR-025)
+- Secret reference model (`secret_ref` type) and secret binding for functions (BR-025)
 - Privilege scope constraints and execution identity validation (BR-039)
 - Input sanitization rules and injection prevention patterns (BR-038)
 - Data protection model: sensitive field annotations, data classification, masking rules (BR-017, BR-127, BR-130)

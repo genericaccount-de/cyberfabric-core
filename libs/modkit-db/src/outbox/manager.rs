@@ -12,19 +12,64 @@ use super::prioritizer::SharedPrioritizer;
 use super::stats::{StatsListener, StatsRegistry, StatsReporter};
 use super::taskward::{
     BackoffConfig, Bulkhead, BulkheadConfig, ConcurrencyLimit, PanicPolicy, TaskSet,
-    TracingListener, WorkerBuilder,
+    TracingListener, WorkerBuilder, poker,
 };
-use super::types::{OutboxConfig, OutboxError, Partitions, QueueConfig, SequencerConfig};
+use super::types::{
+    OutboxConfig, OutboxError, OutboxProfile, Partitions, SequencerConfig, WorkerTuning,
+};
 use super::workers::sequencer::{Sequencer, SequencerReport};
 use super::workers::vacuum::{VacuumReport, VacuumTask};
 use crate::Db;
 
-/// Deferred queue declaration — config + factory, resolved at `start()`.
+/// Deferred queue declaration — factory, resolved at `start()`.
 pub struct QueueDeclaration {
     pub(crate) name: String,
     pub(crate) partitions: Partitions,
-    pub(crate) config: QueueConfig,
     pub(crate) factory: Box<dyn super::builder::ProcessorFactory>,
+}
+
+// ---------------------------------------------------------------------------
+// Internal helpers for start() decomposition
+// ---------------------------------------------------------------------------
+
+/// Resolved per-worker tuning values (per-worker > profile > hardcoded default).
+struct ResolvedTuning {
+    processor: WorkerTuning,
+    sequencer: WorkerTuning,
+    vacuum: WorkerTuning,
+    reconciler: WorkerTuning,
+}
+
+/// Short-lived context bag passed to spawn helpers during `start()`.
+struct StartContext<'a> {
+    db: &'a Db,
+    cancel: &'a CancellationToken,
+    task_set: &'a mut super::taskward::TaskSet,
+    start_notify: &'a Arc<Notify>,
+    stats_registry: &'a Option<Arc<std::sync::Mutex<super::stats::StatsRegistry>>>,
+}
+
+/// Wire a [`StatsListener`] into a [`WorkerBuilder`] if stats collection is enabled.
+///
+/// Eliminates the duplicated stats-wiring pattern used by sequencer, vacuum, and
+/// processor worker factories.
+type StatsExtractor = Box<dyn Fn(&dyn std::any::Any) -> u64 + Send + Sync>;
+
+pub(super) fn register_stats<P: Send + Sync + 'static>(
+    builder: WorkerBuilder<P>,
+    registry: Option<&Arc<std::sync::Mutex<StatsRegistry>>>,
+    category: &str,
+    extractor: StatsExtractor,
+) -> WorkerBuilder<P> {
+    if let Some(reg) = registry {
+        let stats = StatsListener::new(extractor);
+        if let Ok(mut guard) = reg.lock() {
+            guard.register(category.to_owned(), stats.clone());
+        }
+        builder.listener(stats)
+    } else {
+        builder
+    }
 }
 
 /// Fluent builder for the outbox pipeline.
@@ -33,9 +78,21 @@ pub struct QueueDeclaration {
 /// settings and register queues with handlers, then call
 /// [`start()`](Self::start) to spawn background tasks.
 ///
+/// # Tuning API
+///
+/// Use [`profile()`](Self::profile) to set a baseline tuning profile for all
+/// workers, then optionally override individual workers with
+/// [`processor_tuning()`](Self::processor_tuning),
+/// [`sequencer_tuning()`](Self::sequencer_tuning),
+/// [`vacuum_tuning()`](Self::vacuum_tuning), or
+/// [`reconciler_tuning()`](Self::reconciler_tuning).
+///
+/// Resolution order: per-worker tuning > profile > hardcoded default.
+///
 /// ```ignore
 /// let handle = Outbox::builder(db)
-///     .poll_interval(Duration::from_millis(100))
+///     .profile(OutboxProfile::high_throughput())
+///     .processor_tuning(WorkerTuning::processor_high_throughput().batch_size(50))
 ///     .queue("orders", Partitions::of(4))
 ///         .decoupled(my_handler)
 ///     .start().await?;
@@ -44,17 +101,17 @@ pub struct QueueDeclaration {
 /// ```
 pub struct OutboxBuilder {
     db: Db,
-    sequencer_batch_size: u32,
-    poll_interval: Duration,
-    poker_interval: Duration,
     partition_batch_limit: u32,
     max_inner_iterations: u32,
     processors: Option<usize>,
     maintenance_guaranteed: Option<usize>,
     maintenance_shared: Option<usize>,
-    vacuum_cooldown: Duration,
     stats_interval: Option<Duration>,
-    steady_pace: Duration,
+    profile: Option<OutboxProfile>,
+    processor_tuning: Option<WorkerTuning>,
+    sequencer_tuning: Option<WorkerTuning>,
+    vacuum_tuning: Option<WorkerTuning>,
+    reconciler_tuning: Option<WorkerTuning>,
     pub(crate) queue_declarations: Vec<QueueDeclaration>,
 }
 
@@ -62,40 +119,25 @@ impl OutboxBuilder {
     pub(crate) fn new(db: Db) -> Self {
         Self {
             db,
-            sequencer_batch_size: super::types::DEFAULT_SEQUENCER_BATCH_SIZE,
-            poll_interval: super::types::DEFAULT_POLL_INTERVAL,
-            poker_interval: super::types::DEFAULT_POKER_INTERVAL,
             partition_batch_limit: super::types::DEFAULT_PARTITION_BATCH_LIMIT,
             max_inner_iterations: super::types::DEFAULT_MAX_INNER_ITERATIONS,
             processors: None,
             maintenance_guaranteed: None,
             maintenance_shared: None,
-            vacuum_cooldown: super::types::DEFAULT_VACUUM_COOLDOWN,
-            stats_interval: Some(Duration::from_secs(10)),
-            steady_pace: Duration::from_millis(10),
+            stats_interval: Some(Duration::from_secs(60)),
+            profile: None,
+            processor_tuning: None,
+            sequencer_tuning: None,
+            vacuum_tuning: None,
+            reconciler_tuning: None,
             queue_declarations: Vec::new(),
         }
-    }
-
-    /// Sequencer batch size (rows per cycle). Default: 100.
-    #[must_use]
-    pub fn sequencer_batch_size(mut self, n: u32) -> Self {
-        self.sequencer_batch_size = n;
-        self
-    }
-
-    /// Safety net fallback poll interval for both the sequencer and
-    /// per-partition processors. Default: 1s.
-    #[must_use]
-    pub fn poll_interval(mut self, d: Duration) -> Self {
-        self.poll_interval = d;
-        self
     }
 
     /// Maximum number of concurrent partition processors across all queues.
     ///
     /// Controls the global processor semaphore. Each partition processor
-    /// acquires one permit before executing. Default: unlimited.
+    /// acquires one permit before executing. Default: 4.
     ///
     /// # Panics
     ///
@@ -138,21 +180,6 @@ impl OutboxBuilder {
         self
     }
 
-    /// Cold reconciler (poker) interval. Default: 60s.
-    /// The poker is a safety net that discovers partitions with pending
-    /// incoming rows by querying the DB. Normally, the hot path (enqueue)
-    /// populates the dirty set directly.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `d` is zero.
-    #[must_use]
-    pub fn poker_interval(mut self, d: Duration) -> Self {
-        assert!(!d.is_zero(), "poker_interval must be > 0");
-        self.poker_interval = d;
-        self
-    }
-
     /// Max partitions the sequencer processes per cycle. Default: 128.
     ///
     /// # Panics
@@ -177,14 +204,7 @@ impl OutboxBuilder {
         self
     }
 
-    /// Minimum interval between full vacuum sweeps. Default: 1h.
-    #[must_use]
-    pub fn vacuum_cooldown(mut self, d: Duration) -> Self {
-        self.vacuum_cooldown = d;
-        self
-    }
-
-    /// Periodic stats reporting interval. Default: 10s.
+    /// Periodic stats reporting interval. Default: 60s.
     /// `Duration::ZERO` disables stats collection entirely.
     #[must_use]
     pub fn stats_interval(mut self, d: Duration) -> Self {
@@ -192,19 +212,232 @@ impl OutboxBuilder {
         self
     }
 
-    /// Steady-state pace between worker executions. Default: 100ms.
-    /// Enforces a minimum interval between consecutive executions even
-    /// when healthy, preventing tight-loop spinning on the database.
-    /// `Duration::ZERO` disables pacing (workers spin as fast as possible).
+    /// Set a baseline tuning profile for all worker types.
+    ///
+    /// Individual worker tunings (e.g. [`processor_tuning()`](Self::processor_tuning))
+    /// override the corresponding profile entry.
+    ///
+    /// Resolution order: per-worker tuning > profile > hardcoded default.
     #[must_use]
-    pub fn steady_pace(mut self, d: Duration) -> Self {
-        self.steady_pace = d;
+    pub fn profile(mut self, profile: OutboxProfile) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
+    /// Override processor worker tuning. Takes precedence over the profile.
+    #[must_use]
+    pub fn processor_tuning(mut self, tuning: WorkerTuning) -> Self {
+        self.processor_tuning = Some(tuning);
+        self
+    }
+
+    /// Override sequencer worker tuning. Takes precedence over the profile.
+    #[must_use]
+    pub fn sequencer_tuning(mut self, tuning: WorkerTuning) -> Self {
+        self.sequencer_tuning = Some(tuning);
+        self
+    }
+
+    /// Override vacuum worker tuning. Takes precedence over the profile.
+    #[must_use]
+    pub fn vacuum_tuning(mut self, tuning: WorkerTuning) -> Self {
+        self.vacuum_tuning = Some(tuning);
+        self
+    }
+
+    /// Override reconciler worker tuning. Takes precedence over the profile.
+    #[must_use]
+    pub fn reconciler_tuning(mut self, tuning: WorkerTuning) -> Self {
+        self.reconciler_tuning = Some(tuning);
         self
     }
 
     /// Begin building a queue registration.
     pub fn queue(self, name: &str, partitions: Partitions) -> QueueBuilder {
         QueueBuilder::new(self, name.to_owned(), partitions)
+    }
+
+    // ------------------------------------------------------------------
+    // Private helpers for start()
+    // ------------------------------------------------------------------
+
+    /// Resolve per-worker tuning: per-worker > profile > hardcoded default.
+    fn resolve_tuning(&self) -> ResolvedTuning {
+        let default_profile = OutboxProfile::default();
+        let profile = self.profile.as_ref().unwrap_or(&default_profile);
+        let resolved = ResolvedTuning {
+            processor: self
+                .processor_tuning
+                .clone()
+                .unwrap_or_else(|| profile.processor.clone()),
+            sequencer: self
+                .sequencer_tuning
+                .clone()
+                .unwrap_or_else(|| profile.sequencer.clone()),
+            vacuum: self
+                .vacuum_tuning
+                .clone()
+                .unwrap_or_else(|| profile.vacuum.clone()),
+            reconciler: self
+                .reconciler_tuning
+                .clone()
+                .unwrap_or_else(|| profile.reconciler.clone()),
+        };
+        resolved.processor.validate();
+        resolved.sequencer.validate();
+        resolved.vacuum.validate();
+        resolved.reconciler.validate();
+        resolved
+    }
+
+    /// Spawn parallel sequencer workers (`guaranteed + shared`).
+    fn spawn_sequencers(
+        ctx: &mut StartContext<'_>,
+        outbox: &Arc<Outbox>,
+        prioritizer: &Arc<SharedPrioritizer>,
+        tuning: &WorkerTuning,
+        guaranteed_sem: &Arc<Semaphore>,
+        shared_sem: &Arc<Semaphore>,
+        count: usize,
+    ) {
+        for i in 0..count {
+            #[allow(unused_mut)]
+            let mut sequencer = Sequencer::new(
+                outbox.config().sequencer.clone(),
+                Arc::clone(outbox),
+                ctx.db.clone(),
+                Arc::clone(prioritizer),
+            );
+            let name = format!("sequencer-{i}");
+            let mut builder = WorkerBuilder::<SequencerReport>::new(&name, ctx.cancel.clone())
+                .pacing(tuning)
+                .notifier(prioritizer.notifier())
+                .notifier(Arc::clone(ctx.start_notify))
+                .bulkhead(Bulkhead::new(
+                    &name,
+                    BulkheadConfig {
+                        semaphore: ConcurrencyLimit::Tiered {
+                            guaranteed: Arc::clone(guaranteed_sem),
+                            shared: Arc::clone(shared_sem),
+                        },
+                        backoff: BackoffConfig::default(),
+                    },
+                ))
+                .listener(TracingListener)
+                .on_panic(PanicPolicy::CatchAndRetry);
+
+            builder = register_stats(
+                builder,
+                ctx.stats_registry.as_ref(),
+                "sequencer",
+                Box::new(|any| {
+                    any.downcast_ref::<SequencerReport>()
+                        .map_or(0, |r| u64::from(r.rows_claimed))
+                }),
+            );
+
+            let worker = builder.build(sequencer);
+            ctx.task_set.spawn(&name, worker.run());
+        }
+    }
+
+    /// Spawn parallel vacuum workers (one per shared permit).
+    ///
+    /// Vacuum workers use Fixed(shared) — not Tiered — so they can only run
+    /// when no sequencer holds the shared permit. This is intentional: garbage
+    /// collection is deferrable, sequencing is not. Under sustained load,
+    /// sequencers preempt vacuum via the biased select in `Tiered::acquire()`.
+    /// See the `maintenance()` doc comment for the full two-tier model.
+    fn spawn_vacuum_workers(
+        ctx: &mut StartContext<'_>,
+        tuning: &WorkerTuning,
+        shared_sem: &Arc<Semaphore>,
+        count: usize,
+    ) {
+        for i in 0..count {
+            #[allow(unused_mut)]
+            let vacuum = VacuumTask::new(ctx.db.clone(), tuning.batch_size as usize);
+            let name = format!("vacuum-{i}");
+            let (poker_notify, _poker_handle) = poker(tuning.idle_interval, ctx.cancel.clone());
+            let mut builder = WorkerBuilder::<VacuumReport>::new(&name, ctx.cancel.clone())
+                .pacing(tuning)
+                .notifier(poker_notify)
+                .notifier(Arc::clone(ctx.start_notify))
+                .bulkhead(Bulkhead::new(
+                    &name,
+                    BulkheadConfig {
+                        semaphore: ConcurrencyLimit::Fixed(Arc::clone(shared_sem)),
+                        backoff: BackoffConfig {
+                            initial: Duration::from_millis(500),
+                            max: Duration::from_secs(60),
+                            ..Default::default()
+                        },
+                    },
+                ))
+                .listener(TracingListener)
+                .on_panic(PanicPolicy::CatchAndRetry);
+
+            builder = register_stats(
+                builder,
+                ctx.stats_registry.as_ref(),
+                "vacuum",
+                Box::new(|any| {
+                    any.downcast_ref::<VacuumReport>()
+                        .map_or(0, |r| r.rows_deleted)
+                }),
+            );
+
+            let worker = builder.build(vacuum);
+            ctx.task_set.spawn(&name, worker.run());
+        }
+    }
+
+    /// Spawn cold reconciler as a `WorkerAction` (ungated, poker-driven).
+    fn spawn_cold_reconciler(
+        ctx: &mut StartContext<'_>,
+        outbox: &Arc<Outbox>,
+        prioritizer: &Arc<SharedPrioritizer>,
+        tuning: &WorkerTuning,
+    ) {
+        let reconciler = super::workers::reconciler::ColdReconciler {
+            outbox: Arc::clone(outbox),
+            db: ctx.db.clone(),
+            prioritizer: Arc::clone(prioritizer),
+        };
+        let name = "cold-reconciler";
+        let (poker_notify, _poker_handle) = poker(tuning.idle_interval, ctx.cancel.clone());
+        let worker = WorkerBuilder::new(name, ctx.cancel.clone())
+            .pacing(tuning)
+            .notifier(poker_notify)
+            .notifier(Arc::clone(ctx.start_notify))
+            .listener(TracingListener)
+            .on_panic(PanicPolicy::CatchAndRetry)
+            .build(reconciler);
+        ctx.task_set.spawn(name, worker.run());
+    }
+
+    /// Spawn stats reporter (if enabled).
+    fn spawn_stats_reporter(
+        ctx: &mut StartContext<'_>,
+        stats_registry_shared: Option<Arc<std::sync::Mutex<StatsRegistry>>>,
+        interval: Duration,
+    ) {
+        // Extract the registry — all workers have registered by now.
+        #[allow(clippy::expect_used)]
+        let registry = stats_registry_shared
+            .expect("stats_registry_shared is Some when stats_interval is Some")
+            .lock()
+            .ok()
+            .map(|mut guard| std::mem::replace(&mut *guard, StatsRegistry::new()))
+            .expect("stats registry mutex not poisoned");
+        let reporter = StatsReporter::new(Arc::new(registry));
+        let name = "stats-reporter";
+        let (poker_notify, _poker_handle) = poker(interval, ctx.cancel.clone());
+        let worker = WorkerBuilder::new(name, ctx.cancel.clone())
+            .notifier(poker_notify)
+            .on_panic(PanicPolicy::CatchAndRetry)
+            .build(reporter);
+        ctx.task_set.spawn(name, worker.run());
     }
 
     /// Spawn background tasks and return a handle to the running pipeline.
@@ -220,21 +453,22 @@ impl OutboxBuilder {
     ///
     /// Panics if the internal stats registry mutex is poisoned.
     pub async fn start(mut self) -> Result<OutboxHandle, OutboxError> {
-        // Build shared prioritizer first — Outbox and sequencer workers
-        // both subscribe to its internal Notify for wakeups.
+        // 1. Resolve tuning
+        let tuning = self.resolve_tuning();
+
+        // 2. Build shared prioritizer — Outbox and sequencer workers both
+        //    subscribe to its internal Notify for wakeups.
         let shared_prioritizer = Arc::new(SharedPrioritizer::new());
 
         let config = OutboxConfig {
             sequencer: SequencerConfig {
-                batch_size: self.sequencer_batch_size,
-                poll_interval: self.poll_interval,
+                batch_size: tuning.sequencer.batch_size,
+                poll_interval: tuning.sequencer.idle_interval,
                 partition_batch_limit: self.partition_batch_limit,
                 max_inner_iterations: self.max_inner_iterations,
             },
         };
-        let outbox = Outbox::new(config);
-
-        let outbox = Arc::new(outbox);
+        let outbox = Arc::new(Outbox::new(config));
         let cancel = CancellationToken::new();
         let mut task_set = TaskSet::new(cancel.clone());
         let start_notify = Arc::new(Notify::new());
@@ -242,9 +476,7 @@ impl OutboxBuilder {
 
         // Global processor semaphore — caps total concurrent partition processors
         let processor_sem = Arc::new(Semaphore::new(
-            self.processors
-                .unwrap_or(Semaphore::MAX_PERMITS)
-                .min(Semaphore::MAX_PERMITS),
+            self.processors.unwrap_or(4).min(Semaphore::MAX_PERMITS),
         ));
 
         // Shared stats registry (wrapped in Mutex for processor factory access)
@@ -254,11 +486,8 @@ impl OutboxBuilder {
             None
         };
 
-        // Register queues and spawn processor workers via factories
+        // 3. Register queues and spawn processor workers via factories
         for decl in &mut self.queue_declarations {
-            // Apply global poll_interval to each queue
-            decl.config.poll_interval = self.poll_interval;
-
             outbox
                 .register_queue(&self.db, &decl.name, decl.partitions.count())
                 .await?;
@@ -268,7 +497,7 @@ impl OutboxBuilder {
             for &pid in &partition_ids {
                 let notify = Arc::new(Notify::new());
                 partition_notify.insert(pid, Arc::clone(&notify));
-                let ctx = super::builder::SpawnContext {
+                let spawn_ctx = super::builder::SpawnContext {
                     pid,
                     db: self.db.clone(),
                     cancel: cancel.clone(),
@@ -277,19 +506,26 @@ impl OutboxBuilder {
                     start_notify: Arc::clone(&start_notify),
                     outbox: Arc::clone(&outbox),
                     stats_registry: stats_registry_shared.clone(),
+                    tuning: tuning.processor.clone(),
                 };
-                let (name, future) = decl.factory.spawn(ctx);
+                let (name, future) = decl.factory.spawn(spawn_ctx);
                 task_set.spawn(name, future);
             }
         }
 
-        // Two-tier maintenance semaphores
-        let guaranteed = self.maintenance_guaranteed.unwrap_or(2);
-        let shared = self.maintenance_shared.unwrap_or(1);
-        let guaranteed_sem = Arc::new(Semaphore::new(guaranteed.min(Semaphore::MAX_PERMITS)));
-        let shared_sem = Arc::new(Semaphore::new(shared.min(Semaphore::MAX_PERMITS)));
+        // 4. Two-tier maintenance semaphores
+        let guaranteed = self
+            .maintenance_guaranteed
+            .unwrap_or(2)
+            .min(Semaphore::MAX_PERMITS);
+        let shared = self
+            .maintenance_shared
+            .unwrap_or(1)
+            .min(Semaphore::MAX_PERMITS);
+        let guaranteed_sem = Arc::new(Semaphore::new(guaranteed));
+        let shared_sem = Arc::new(Semaphore::new(shared));
 
-        // Collect per-partition notify map for the sequencer
+        // 5. Wire partition notifiers for the sequencer
         let mut notify_map: HashMap<i64, Arc<Notify>> = HashMap::new();
         for entry in &partition_notify {
             notify_map.insert(*entry.key(), Arc::clone(entry.value()));
@@ -301,127 +537,41 @@ impl OutboxBuilder {
             .set_prioritizer(Arc::clone(&shared_prioritizer))
             .await;
 
-        // Eager reconciliation at startup: discover pending partitions
-        // from the incoming table before spawning the sequencer.
+        // 6. Eager reconciliation at startup
         super::workers::reconciler::reconcile_dirty(&outbox, &self.db, &shared_prioritizer).await;
 
-        // Spawn parallel sequencer workers (guaranteed + shared)
-        let sequencer_count = guaranteed + shared;
-        for i in 0..sequencer_count {
-            #[allow(unused_mut)]
-            let mut sequencer = Sequencer::new(
-                outbox.config().sequencer.clone(),
-                Arc::clone(&outbox),
-                self.db.clone(),
-                Arc::clone(&shared_prioritizer),
-            );
-            let name = format!("sequencer-{i}");
-            let mut builder = WorkerBuilder::<SequencerReport>::new(&name, cancel.clone())
-                .notifier(shared_prioritizer.notifier())
-                .notifier(Arc::clone(&start_notify))
-                .bulkhead(Bulkhead::new(
-                    &name,
-                    BulkheadConfig {
-                        semaphore: ConcurrencyLimit::Tiered {
-                            guaranteed: Arc::clone(&guaranteed_sem),
-                            shared: Arc::clone(&shared_sem),
-                        },
-                        backoff: BackoffConfig::default(),
-                        steady_pace: self.steady_pace,
-                    },
-                ))
-                .listener(TracingListener)
-                .on_panic(PanicPolicy::CatchAndRetry);
+        let mut ctx = StartContext {
+            db: &self.db,
+            cancel: &cancel,
+            task_set: &mut task_set,
+            start_notify: &start_notify,
+            stats_registry: &stats_registry_shared,
+        };
 
-            if let Some(ref registry) = stats_registry_shared {
-                let stats = StatsListener::new(Box::new(|any| {
-                    any.downcast_ref::<SequencerReport>()
-                        .map_or(0, |r| u64::from(r.rows_claimed))
-                }));
-                if let Ok(mut reg) = registry.lock() {
-                    reg.register("sequencer".to_owned(), stats.clone());
-                }
-                builder = builder.listener(stats);
-            }
+        // 7. Spawn sequencers
+        let sequencer_count = guaranteed.saturating_add(shared);
+        Self::spawn_sequencers(
+            &mut ctx,
+            &outbox,
+            &shared_prioritizer,
+            &tuning.sequencer,
+            &guaranteed_sem,
+            &shared_sem,
+            sequencer_count,
+        );
 
-            let worker = builder.build(sequencer);
-            task_set.spawn(&name, worker.run());
-        }
+        // 8. Spawn cold reconciler
+        Self::spawn_cold_reconciler(&mut ctx, &outbox, &shared_prioritizer, &tuning.reconciler);
 
-        // Spawn cold reconciler as a WorkerAction (ungated, poker-driven)
-        {
-            let reconciler = super::workers::reconciler::ColdReconciler {
-                outbox: Arc::clone(&outbox),
-                db: self.db.clone(),
-                prioritizer: Arc::clone(&shared_prioritizer),
-            };
-            let name = "cold-reconciler";
-            let worker = WorkerBuilder::new(name, cancel.clone())
-                .with_poker(self.poker_interval)
-                .notifier(Arc::clone(&start_notify))
-                .listener(TracingListener)
-                .on_panic(PanicPolicy::CatchAndRetry)
-                .build(reconciler);
-            task_set.spawn(name, worker.run());
-        }
+        // 9. Spawn vacuum workers
+        Self::spawn_vacuum_workers(&mut ctx, &tuning.vacuum, &shared_sem, shared);
 
-        // Spawn parallel vacuum workers (one per shared permit)
-        for i in 0..shared {
-            #[allow(unused_mut)]
-            let vacuum = VacuumTask::new(self.db.clone(), self.vacuum_cooldown);
-            let name = format!("vacuum-{i}");
-            let mut builder = WorkerBuilder::<VacuumReport>::new(&name, cancel.clone())
-                .with_poker(self.vacuum_cooldown)
-                .notifier(Arc::clone(&start_notify))
-                .bulkhead(Bulkhead::new(
-                    &name,
-                    BulkheadConfig {
-                        semaphore: ConcurrencyLimit::Fixed(Arc::clone(&shared_sem)),
-                        backoff: BackoffConfig {
-                            initial: Duration::from_millis(500),
-                            max: Duration::from_secs(60),
-                            ..Default::default()
-                        },
-                        steady_pace: Duration::ZERO,
-                    },
-                ))
-                .listener(TracingListener)
-                .on_panic(PanicPolicy::CatchAndRetry);
-
-            if let Some(ref registry) = stats_registry_shared {
-                let stats = StatsListener::new(Box::new(|any| {
-                    any.downcast_ref::<VacuumReport>()
-                        .map_or(0, |r| r.rows_deleted)
-                }));
-                if let Ok(mut reg) = registry.lock() {
-                    reg.register("vacuum".to_owned(), stats.clone());
-                }
-                builder = builder.listener(stats);
-            }
-
-            let worker = builder.build(vacuum);
-            task_set.spawn(&name, worker.run());
-        }
-
-        // Spawn stats reporter (if enabled)
+        // 10. Spawn stats reporter (if enabled)
         if let Some(interval) = self.stats_interval {
-            // Extract the registry — all workers have registered by now.
-            #[allow(clippy::expect_used)]
-            let registry = stats_registry_shared
-                .expect("stats_registry_shared is Some when stats_interval is Some")
-                .lock()
-                .ok()
-                .map(|mut guard| std::mem::replace(&mut *guard, StatsRegistry::new()))
-                .expect("stats registry mutex not poisoned");
-            let reporter = StatsReporter::new(Arc::new(registry));
-            let name = "stats-reporter";
-            let worker = WorkerBuilder::new(name, cancel.clone())
-                .with_poker(interval)
-                .on_panic(PanicPolicy::CatchAndRetry)
-                .build(reporter);
-            task_set.spawn(name, worker.run());
+            Self::spawn_stats_reporter(&mut ctx, stats_registry_shared.clone(), interval);
         }
 
+        // 11. Signal all workers to start
         start_notify.notify_waiters();
 
         Ok(OutboxHandle {

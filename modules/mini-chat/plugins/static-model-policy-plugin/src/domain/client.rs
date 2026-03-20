@@ -97,10 +97,6 @@ mod tests {
     use time::OffsetDateTime;
 
     fn make_entry(model_id: &str, tier: ModelTier) -> ModelCatalogEntry {
-        let tier_str = match tier {
-            ModelTier::Standard => "standard",
-            ModelTier::Premium => "premium",
-        };
         ModelCatalogEntry {
             model_id: model_id.to_owned(),
             provider_model_id: format!("{model_id}-v1"),
@@ -121,9 +117,9 @@ mod tests {
             multiplier_display: "1x".to_owned(),
             estimation_budgets: EstimationBudgets::default(),
             max_retrieved_chunks_per_turn: 5,
+            max_tool_calls: 2,
             general_config: ModelGeneralConfig {
                 config_type: String::new(),
-                tier: tier_str.to_owned(),
                 available_from: OffsetDateTime::UNIX_EPOCH,
                 max_file_size_mb: 25,
                 api_params: ModelApiParams {
@@ -182,10 +178,10 @@ mod tests {
                     speed_tokens_per_second: 100,
                 },
             },
-            preference: ModelPreference {
+            preference: Some(ModelPreference {
                 is_default: false,
                 sort_order: 0,
-            },
+            }),
             system_prompt: String::new(),
             thread_summary_prompt: String::new(),
         }

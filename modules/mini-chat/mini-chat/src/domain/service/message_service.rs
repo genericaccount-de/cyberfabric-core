@@ -53,18 +53,19 @@ impl<MR: MessageRepository, CR: ChatRepository, RR: ReactionRepository> MessageS
 
         let conn = self.db.conn().map_err(DomainError::from)?;
 
-        let scope = self
+        let chat_scope = self
             .enforcer
             .access_scope(ctx, &resources::CHAT, actions::LIST_MESSAGES, Some(chat_id))
-            .await?;
+            .await?
+            .ensure_owner(ctx.subject_id());
 
         // Verify chat exists (scoped)
         self.chat_repo
-            .get(&conn, &scope, chat_id)
+            .get(&conn, &chat_scope, chat_id)
             .await?
             .ok_or_else(|| DomainError::chat_not_found(chat_id))?;
 
-        let msg_scope = scope.tenant_only();
+        let msg_scope = chat_scope.tenant_only();
         let page = self
             .message_repo
             .list_by_chat(&conn, &msg_scope, chat_id, query)
@@ -78,7 +79,7 @@ impl<MR: MessageRepository, CR: ChatRepository, RR: ReactionRepository> MessageS
             .await?;
 
         // Batch-fetch the current user's reactions for all returned messages.
-        let reaction_scope = scope.tenant_and_owner();
+        let reaction_scope = chat_scope.tenant_and_owner();
         let mut reaction_map = self
             .reaction_repo
             .batch_by_user(&conn, &reaction_scope, &msg_ids, ctx.subject_id())

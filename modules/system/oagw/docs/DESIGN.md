@@ -1,5 +1,37 @@
 # Technical Design — Outbound API Gateway (OAGW)
 
+
+<!-- toc -->
+
+- [1. Architecture Overview](#1-architecture-overview)
+  - [1.1 Architectural Vision](#11-architectural-vision)
+  - [1.2 Architecture Drivers](#12-architecture-drivers)
+  - [1.3 Architecture Layers](#13-architecture-layers)
+  - [1.4 High-Level Architecture Diagram](#14-high-level-architecture-diagram)
+- [2. Principles & Constraints](#2-principles--constraints)
+  - [2.1 Design Principles](#21-design-principles)
+  - [2.2 Constraints](#22-constraints)
+- [3. Technical Architecture](#3-technical-architecture)
+  - [3.1 Domain Model](#31-domain-model)
+  - [3.2 Component Model](#32-component-model)
+  - [3.3 API Contracts](#33-api-contracts)
+  - [3.4 Internal & External Dependencies](#34-internal--external-dependencies)
+  - [3.5 Interactions & Sequences](#35-interactions--sequences)
+  - [3.6 Database Schemas & Tables](#36-database-schemas--tables)
+- [4. Additional Context](#4-additional-context)
+  - [4.1 Caching Strategy](#41-caching-strategy)
+  - [4.2 Metrics and Observability](#42-metrics-and-observability)
+  - [4.3 Audit Logging](#43-audit-logging)
+  - [4.4 Security Considerations](#44-security-considerations)
+  - [4.5 Out of Scope](#45-out-of-scope)
+  - [4.6 Review](#46-review)
+  - [4.7 Future Developments](#47-future-developments)
+- [5. Traceability](#5-traceability)
+  - [5.1 PRD Coverage](#51-prd-coverage)
+  - [5.2 ADR Coverage](#52-adr-coverage)
+
+<!-- /toc -->
+
 ## 1. Architecture Overview
 
 ### 1.1 Architectural Vision

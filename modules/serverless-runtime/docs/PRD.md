@@ -4,13 +4,11 @@
 <!-- cpt:##:overview -->
 ## 1. Overview
 
-<!-- cpt:paragraph:purpose -->
-**Purpose**: Provide a platform capability that enables tenants and their users to create, modify, register, and execute custom automation (functions and workflows) at runtime, without requiring a product rebuild or redeploy, while maintaining strong isolation, governance, and operational visibility.
-<!-- cpt:paragraph:purpose -->
+### Purpose
 
-<!-- cpt:paragraph:context -->
-The platform requires a unified way to automate long-running and multi-step business processes across modules and external systems. Today, automation capability is limited by release cycles and lacks durable, tenant-isolated execution with governance, controls, and observability. This PRD defines the business requirements for a Serverless Runtime capability that is deliberately implementation-agnostic — the requirements can be satisfied by embedded interpreters (e.g., Starlark, WASM), workflow orchestration engines (e.g., Temporal, Cadence), cloud-native FaaS platforms (e.g., AWS Lambda + Step Functions), or other serverless/workflow technologies. The system MAY support domain-specific languages (DSLs) for workflow/function definition; DSL support is implementation-specific and not required to satisfy these business requirements.
-<!-- cpt:paragraph:context -->
+<!-- cpt:paragraph:purpose -->
+Provide a platform capability that enables tenants and their users to create, modify, register, and execute custom automation (functions and workflows) at runtime, without requiring a product rebuild or redeploy, while maintaining strong isolation, governance, and operational visibility.
+<!-- cpt:paragraph:purpose -->
 
 **Target Users**:
 <!-- cpt:list:target-users required="true" -->
@@ -20,6 +18,12 @@ The platform requires a unified way to automate long-running and multi-step busi
 - Platform operators who monitor, maintain, and develop the serverless runtime environment and Infrastructure Adapters
 <!-- cpt:list:target-users -->
 
+### Background / Problem Statement
+
+<!-- cpt:paragraph:context -->
+The platform requires a unified way to automate long-running and multi-step business processes across modules and external systems. Today, automation capability is limited by release cycles and lacks durable, tenant-isolated execution with governance, controls, and observability. This PRD defines the business requirements for a Serverless Runtime capability that is deliberately implementation-agnostic — the requirements can be satisfied by embedded interpreters (e.g., Starlark, WASM), workflow orchestration engines (e.g., Temporal, Cadence), cloud-native FaaS platforms (e.g., AWS Lambda + Step Functions), or other serverless/workflow technologies. The system can optionally support domain-specific languages (DSLs) for workflow/function definition; DSL support is implementation-specific and not required to satisfy these business requirements.
+<!-- cpt:paragraph:context -->
+
 **Key Problems Solved**:
 <!-- cpt:list:key-problems required="true" -->
 - Automation capability is limited by release cycles — tenants cannot deploy custom logic without platform rebuilds
@@ -27,6 +31,8 @@ The platform requires a unified way to automate long-running and multi-step busi
 - Lack of tenant-isolated execution with governance controls, resource limits, and auditability
 - Insufficient operational visibility and debugging tools for distributed workflow executions
 <!-- cpt:list:key-problems -->
+
+### Goals (Business Outcomes)
 
 **Success Criteria**:
 <!-- cpt:list:success-criteria required="true" -->
@@ -43,144 +49,204 @@ The platform requires a unified way to automate long-running and multi-step busi
 **Capabilities**:
 <!-- cpt:list:capabilities required="true" -->
 - Runtime creation, modification, registration, and execution of functions and workflows without platform rebuild
-- Tenant- and user-scoped registries with isolation, ownership, and access control
-- Long-running asynchronous and synchronous execution with durable state persistence
-- Multiple trigger modes: schedule-based, API-triggered, and event-driven
+- Common calling mechanism for functions and workflows via a unified function invocation surface
+- Tenant-, application-owner-, and user-scoped registries with isolation, ownership, and access control
+- Long-running asynchronous and synchronous execution with durable state persistence, including streaming inputs/outputs
+- Multiple trigger modes: schedule-based, API-triggered, event-driven, and internal invocation (helper/extended functions)
 - Governance controls via resource limits, quotas, and policies per tenant and per definition
+- Host-Worker isolation for secure multi-tenant execution environments
 - Rich operational tooling: execution visibility, debugging, audit trails, and observability
 - Built-in support for saga/compensation patterns and idempotency mechanisms
-- Infrastructure adapter integration with hot-plug registration
+- Infrastructure adapter integration with hot-plug registration and hot (re)loading of native modules
 <!-- cpt:list:capabilities -->
+
+### Glossary
+
+| Term | Definition |
+|------|------------|
+| **Workflow** | A durable, resumable process that orchestrates a sequence of steps; maintains state across failures and can run for extended periods (days to years). |
+| **Workflow Definition** | A specification of workflow steps, inputs, outputs, error handling logic, and compensation behavior. |
+| **Workflow Instance** | A single execution of a workflow definition with specific input parameters and state. |
+| **Function** | A single unit of custom logic that can be invoked independently or as part of a workflow. |
+| **Callable Base Type** | Unified base type for all callable entities (functions and workflows); a registered definition that can be invoked via the runtime API. Workflows extend this base with additional traits. |
+| **Function Definition** | Canonical definition for a function using a GTS-identified JSON Schema with pinned params/returns/errors and traits. |
+| **Invocation Mode** | Execution mode for a function: `sync` (caller waits for result) or `async` (caller receives an invocation id and polls for status). |
+| **Compensation** | A rollback action that reverses the effect of previously completed steps when a workflow fails (saga pattern). |
+| **Scheduled Workflow** | A workflow that executes on a recurring schedule (periodic/cron-based). |
+| **Infrastructure Adapter** | A modular component that integrates external infrastructure (clouds, on-prem systems) and can provide adapter-specific workflow definitions. |
+| **Hot-Plug** | The ability to register new workflow/function definitions at runtime without system restart. |
+| **Security Context** | Workflow-scoped state containing identity, tenant, and authorization context, preserved throughout workflow execution for communication with platform services. |
+| **Execution** | A running or completed instance of a workflow or function, tracked with a unique invocation ID and correlation ID. |
+| **Saga Pattern** | A distributed transaction pattern where a long-running workflow is broken into steps, each with a compensating action to undo its effects if the workflow fails. |
+| **Tenant Isolation** | Strict separation ensuring one tenant's workflows, executions, and data cannot be accessed by another tenant. |
+| **Durable Execution** | Execution that persists state and survives infrastructure failures, allowing workflows to resume from the last completed step. |
+| **RTO** | Recovery Time Objective — the maximum acceptable time to restore service after a failure. |
+| **RPO** | Recovery Point Objective — the maximum acceptable amount of data loss measured in time. |
+| **TTL** | Time To Live — the duration for which a cached result remains valid before expiring. |
+
 <!-- cpt:##:overview -->
 
 <!-- cpt:##:actors -->
 ## 2. Actors
 
-**Human Actors**
+### Human Actors
 
-<!-- cpt:###:actor-title repeat="many" -->
-### Application Developer
+<!-- cpt:####:actor-title repeat="many" -->
+#### Application Developer
 
 <!-- cpt:id:actor -->
-**ID**: `cpt-serverless-runtime-actor-app-developer`
+**ID**: `cpt-cf-serverless-runtime-actor-app-developer`
 
 <!-- cpt:paragraph:actor-role -->
 **Role**: Provides custom functions and workflows for integrations at runtime. Uses the serverless runtime to isolate and consolidate orchestration logic, reducing direct dependencies between services by delegating multi-step business processes to durable workflow orchestrations. Creates platform-level and integration-specific workflow/function definitions. Uses debugging and profiling tools to troubleshoot failures and performance issues. Reviews audit records and operational metrics for compliance and incident response.
 <!-- cpt:paragraph:actor-role -->
 <!-- cpt:id:actor -->
-<!-- cpt:###:actor-title repeat="many" -->
+<!-- cpt:####:actor-title repeat="many" -->
 
-<!-- cpt:###:actor-title repeat="many" -->
-### Tenant Administrator
+<!-- cpt:####:actor-title repeat="many" -->
+#### Tenant Administrator
 
 <!-- cpt:id:actor -->
-**ID**: `cpt-serverless-runtime-actor-tenant-admin`
+**ID**: `cpt-cf-serverless-runtime-actor-tenant-admin`
 
 <!-- cpt:paragraph:actor-role -->
 **Role**: Manages automation assets within a tenant scope — creates, modifies, versions, and governs workflow/function definitions at the tenant level. Configures schedules, permissions, resource quotas, and retention policies. Monitors execution status and manages the lifecycle of running executions (cancel, retry, suspend, resume). Acts as the authority for tenant-level governance, sharing, and access control.
 <!-- cpt:paragraph:actor-role -->
 <!-- cpt:id:actor -->
-<!-- cpt:###:actor-title repeat="many" -->
+<!-- cpt:####:actor-title repeat="many" -->
 
-<!-- cpt:###:actor-title repeat="many" -->
-### Tenant User
+<!-- cpt:####:actor-title repeat="many" -->
+#### Tenant User
 
 <!-- cpt:id:actor -->
-**ID**: `cpt-serverless-runtime-actor-tenant-user`
+**ID**: `cpt-cf-serverless-runtime-actor-tenant-user`
 
 <!-- cpt:paragraph:actor-role -->
 **Role**: Creates and manages personal workflow/function automations within a user-scoped context. Has the same operational capabilities as a Tenant Administrator but limited to personal (user-scoped) definitions and executions. Can create, modify, execute, and monitor their own workflows/functions. User-scoped definitions are private by default and subject to tenant-level governance and resource quotas.
 <!-- cpt:paragraph:actor-role -->
 <!-- cpt:id:actor -->
-<!-- cpt:###:actor-title repeat="many" -->
+<!-- cpt:####:actor-title repeat="many" -->
 
-<!-- cpt:###:actor-title repeat="many" -->
-### Platform Operator
+<!-- cpt:####:actor-title repeat="many" -->
+#### Platform Operator
 
 <!-- cpt:id:actor -->
-**ID**: `cpt-serverless-runtime-actor-platform-operator`
+**ID**: `cpt-cf-serverless-runtime-actor-platform-operator`
 
 <!-- cpt:paragraph:actor-role -->
 **Role**: Monitors and maintains the serverless runtime environment. Views execution state, history, and pending work across tenants. Uses debugging and profiling tools to troubleshoot failures and performance issues. Reviews audit records and operational metrics for compliance and incident response. Maintains and develops Infrastructure Adapters, including hot-plug registration of adapter-specific workflow definitions.
 <!-- cpt:paragraph:actor-role -->
 <!-- cpt:id:actor -->
-<!-- cpt:###:actor-title repeat="many" -->
+<!-- cpt:####:actor-title repeat="many" -->
 
-**System Actors**
+### System Actors
 
-<!-- cpt:###:actor-title repeat="many" -->
-### Outbound API Gateway
+<!-- cpt:####:actor-title repeat="many" -->
+#### Outbound API Gateway
 
 <!-- cpt:id:actor -->
-**ID**: `cpt-serverless-runtime-actor-outbound-api-gw`
+**ID**: `cpt-cf-serverless-runtime-actor-outbound-api-gw`
 
 <!-- cpt:paragraph:actor-role -->
 **Role**: Manages all outbound API requests from CyberFabric to external services. Provides the runtime capability for workflows and functions to make outbound HTTP calls, enforcing policies such as rate limiting, authentication injection, circuit breaking, and audit logging for all external communication.
 <!-- cpt:paragraph:actor-role -->
 <!-- cpt:id:actor -->
-<!-- cpt:###:actor-title repeat="many" -->
+<!-- cpt:####:actor-title repeat="many" -->
 
-<!-- cpt:###:actor-title repeat="many" -->
-### Types Registry
+<!-- cpt:####:actor-title repeat="many" -->
+#### Types Registry
 
 <!-- cpt:id:actor -->
-**ID**: `cpt-serverless-runtime-actor-types-registry`
+**ID**: `cpt-cf-serverless-runtime-actor-types-registry`
 
 <!-- cpt:paragraph:actor-role -->
 **Role**: Provides GTS (Global Type System) schema and instance registration, validation, and resolution. Used by the serverless runtime to validate workflow/function definition schemas, input/output type contracts, and to ensure type compatibility across workflow composition and versioning.
 <!-- cpt:paragraph:actor-role -->
 <!-- cpt:id:actor -->
-<!-- cpt:###:actor-title repeat="many" -->
+<!-- cpt:####:actor-title repeat="many" -->
 
-<!-- cpt:###:actor-title repeat="many" -->
-### Authorization Engine
+<!-- cpt:####:actor-title repeat="many" -->
+#### Authorization Engine
 
 <!-- cpt:id:actor -->
-**ID**: `cpt-serverless-runtime-actor-authz-engine`
+**ID**: `cpt-cf-serverless-runtime-actor-authz-engine`
 
 <!-- cpt:paragraph:actor-role -->
 **Role**: Provides authorization decisions for all workflow/function management and execution operations. The serverless runtime delegates authorization checks to this engine for definition management, execution start, execution query, execution cancellation, lifecycle operations, and sharing/visibility changes.
 <!-- cpt:paragraph:actor-role -->
 <!-- cpt:id:actor -->
-<!-- cpt:###:actor-title repeat="many" -->
+<!-- cpt:####:actor-title repeat="many" -->
 
-<!-- cpt:###:actor-title repeat="many" -->
-### Audit Engine
+<!-- cpt:####:actor-title repeat="many" -->
+#### Audit Engine
 
 <!-- cpt:id:actor -->
-**ID**: `cpt-serverless-runtime-actor-audit-engine`
+**ID**: `cpt-cf-serverless-runtime-actor-audit-engine`
 
 <!-- cpt:paragraph:actor-role -->
 **Role**: Stores audit trail records for definition lifecycle events and execution lifecycle events, ensuring records identify tenant, actor, and correlation identifier.
 <!-- cpt:paragraph:actor-role -->
 <!-- cpt:id:actor -->
-<!-- cpt:###:actor-title repeat="many" -->
+<!-- cpt:####:actor-title repeat="many" -->
 
-<!-- cpt:###:actor-title repeat="many" -->
-### Infrastructure Adapter
+<!-- cpt:####:actor-title repeat="many" -->
+#### Infrastructure Adapter
 
 <!-- cpt:id:actor -->
-**ID**: `cpt-serverless-runtime-actor-infra-adapter`
+**ID**: `cpt-cf-serverless-runtime-actor-infra-adapter`
 
 <!-- cpt:paragraph:actor-role -->
 **Role**: A modular component that integrates external infrastructure (clouds, on-prem systems) with the serverless runtime. Provides adapter-specific workflow/function definitions and execution capabilities. May use per-tenant or shared infrastructure depending on compliance and performance requirements.
 <!-- cpt:paragraph:actor-role -->
 <!-- cpt:id:actor -->
-<!-- cpt:###:actor-title repeat="many" -->
+<!-- cpt:####:actor-title repeat="many" -->
 
-<!-- cpt:###:actor-title repeat="many" -->
-### Event Broker
+<!-- cpt:####:actor-title repeat="many" -->
+#### Event Broker
 
 <!-- cpt:id:actor -->
-**ID**: `cpt-serverless-runtime-actor-event-broker`
+**ID**: `cpt-cf-serverless-runtime-actor-event-broker`
 
 <!-- cpt:paragraph:actor-role -->
 **Role**: Provides publish/subscribe event delivery infrastructure. The serverless runtime consumes events as triggers for event-driven workflow starts and publishes lifecycle events, audit events, and notification events for downstream consumers.
 <!-- cpt:paragraph:actor-role -->
 <!-- cpt:id:actor -->
-<!-- cpt:###:actor-title repeat="many" -->
+<!-- cpt:####:actor-title repeat="many" -->
 
 <!-- cpt:##:actors -->
+
+## Operational Concept & Environment
+
+The Serverless Runtime operates as a module within the CyberFabric modular monolith. It is deployed alongside other platform modules and shares the platform's identity, authorization, event, and observability infrastructure. The runtime executes tenant-provided and adapter-provided functions and workflows within the platform's security boundary.
+
+**Deployment context**: The runtime runs within the CyberFabric server process. Executor implementations (e.g., Starlark) are embedded as native modules. Infrastructure Adapters connect externally and register definitions via hot-plug APIs.
+
+**Operational environment**: Multi-tenant SaaS platform with tenant isolation enforced at the execution, data, and governance layers. Each tenant has independent quotas, policies, and retention settings.
+
+## Scope
+
+### In Scope
+
+- Runtime creation, modification, versioning, and registration of functions and workflows
+- Unified function invocation surface (sync and async modes)
+- Tenant-isolated registry with ownership scoping (user/tenant/system)
+- Long-running durable execution with checkpointing and suspend/resume
+- Schedule-based, API-triggered, event-driven, and internal invocation triggers
+- Configurable retry, compensation, and dead letter handling
+- Resource governance (limits, quotas, throttling) per tenant and per definition
+- Execution visibility, querying, and lifecycle management
+- Input validation and security enforcement
+- Audit trail for definition and execution lifecycle events
+- Pluggable executor architecture for multiple runtime technologies
+- Infrastructure Adapter integration with hot-plug registration
+
+### Out of Scope
+
+- Visual workflow designer UI (future capability)
+- External workflow template marketplace
+- Real-time event streaming infrastructure (assumed to exist as a separate platform capability)
+- Specific access control model selection (RBAC, ReBAC, ABAC) — the runtime provides integration points
+- Workflow DSL syntax specification (implementation-specific per executor)
 
 <!-- cpt:##:frs -->
 ## 3. Functional Requirements
@@ -189,23 +255,27 @@ The platform requires a unified way to automate long-running and multi-step busi
 ### FR-001 Runtime Authoring and Definition Management
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p1` - **ID**: `cpt-serverless-runtime-fr-runtime-authoring`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-fr-runtime-authoring`
 
 <!-- cpt:free:fr-summary -->
-The system MUST allow tenants and their users to create and modify functions and workflows at runtime, such that changes can be applied without rebuilding or redeploying the platform (BR-001).
+The system allows tenants and their users to create and modify functions and workflows at runtime, such that changes can be applied without rebuilding or redeploying the platform (BR-001).
 
-The system MUST validate workflow/function definitions before registration and reject invalid definitions with actionable feedback including: the specific validation error type, the location in the definition (line number, field path, or step identifier), a human-readable error message, and suggested corrections where applicable (BR-011).
+The system validates workflow/function definitions before registration and rejects invalid definitions with actionable feedback including: the specific validation error type, the location in the definition (line number, field path, or step identifier), a human-readable error message, and suggested corrections where applicable (BR-011).
 
-The system MUST support versioning of workflow/function definitions so that new executions can use an updated version, in-flight executions continue with the version they started with, and changes are traceable and can be rolled back where needed (BR-018).
+The system supports versioning of workflow/function definitions so that new executions can use an updated version, in-flight executions continue with the version they started with, and changes are traceable and can be rolled back where needed (BR-018).
 
-Workflow/function definitions MUST be expressible in a form that allows automated tools (including LLMs) to reliably create, update, validate, and explain the workflow/function behavior in human-readable form (BR-031).
+Workflow/function definitions are expressible in a form that allows automated tools (including LLMs) to reliably create, update, validate, and explain the workflow/function behavior in human-readable form (BR-031).
 
-The system MUST support starting workflows/functions with typed input parameters and receiving typed outputs, such that inputs/outputs can be validated before execution and safely inspected in execution history subject to privacy controls (BR-032).
+The system supports starting workflows/functions with typed input parameters and receiving typed outputs, such that inputs/outputs can be validated before execution and safely inspected in execution history subject to privacy controls (BR-032).
+
+The system provides a common calling mechanism so that functions and workflows are invoked through a unified function surface, enabling consistent invocation semantics regardless of the underlying runtime implementation.
+
+The system is expected to support hot (re)loading of native modules so that executor implementations and runtime extensions can be updated without platform restart.
 <!-- cpt:free:fr-summary -->
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-tenant-admin`, `cpt-serverless-runtime-actor-tenant-user`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-tenant-admin`, `cpt-cf-serverless-runtime-actor-tenant-user`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -214,13 +284,13 @@ The system MUST support starting workflows/functions with typed input parameters
 ### FR-002 Tenant-Isolated Registry and Access Control
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p1` - **ID**: `cpt-serverless-runtime-fr-tenant-registry`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-fr-tenant-registry`
 
 <!-- cpt:free:fr-summary -->
-The system MUST provide a registry of functions and workflows per tenant with the following characteristics (BR-002, BR-036):
+The system provides a registry of functions and workflows per tenant with the following characteristics (BR-002, BR-036):
 
 - Default tenant isolation: workflows and functions MUST be isolated per tenant by default; a tenant MUST NOT see or access another tenant's workflows/functions without explicit sharing
-- Ownership scoping: workflows and functions MUST support both tenant-level and user-level ownership; user-scoped definitions are private to the owning user by default, tenant-scoped definitions are visible to authorized users within the tenant
+- Ownership scoping: workflows and functions support both tenant-level and user-level ownership; user-scoped definitions are private to the owning user by default, tenant-scoped definitions are visible to authorized users within the tenant
 - Access control integration: the system MUST integrate with access control mechanisms to manage who can create, modify, execute, view, and share workflows/functions
 - Querying available definitions visible to the requesting actor (based on ownership and sharing policies)
 - Filtering by ownership scope (tenant-level or user-level), category, or tags
@@ -228,12 +298,12 @@ The system MUST provide a registry of functions and workflows per tenant with th
 
 The system MUST support enabling the workflow/function runtime for a tenant in a way that provisions required isolation and governance settings (including quotas) so the tenant can safely use the capability (BR-020).
 
-**Note**: The specific access control model (RBAC, ReBAC, ABAC, or other) is out of scope for this PRD. The system MUST provide integration points for authorization checks at: definition management, execution start, execution query, execution cancellation, lifecycle operations, and sharing/visibility changes.
+**Note**: The specific access control model (RBAC, ReBAC, ABAC, or other) is out of scope for this PRD. The system provides integration points for authorization checks at: definition management, execution start, execution query, execution cancellation, lifecycle operations, and sharing/visibility changes.
 <!-- cpt:free:fr-summary -->
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-tenant-admin`, `cpt-serverless-runtime-actor-tenant-user`, `cpt-serverless-runtime-actor-authz-engine`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-tenant-admin`, `cpt-cf-serverless-runtime-actor-tenant-user`, `cpt-cf-serverless-runtime-actor-authz-engine`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -242,21 +312,23 @@ The system MUST support enabling the workflow/function runtime for a tenant in a
 ### FR-003 Execution Engine and Durability
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p1` - **ID**: `cpt-serverless-runtime-fr-execution-engine`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-fr-execution-engine`
 
 <!-- cpt:free:fr-summary -->
-The system MUST support long-running asynchronous functions and workflows, including executions lasting days and longer where needed for business processes (BR-003).
+The system supports long-running asynchronous functions and workflows, including executions lasting days and longer where needed for business processes (BR-003).
 
-The system MUST support synchronous request/response invocation as a first-class feature for short-running executions, where the caller receives the result (or error) in the same API response. This mode MUST be optional and MUST NOT replace long-running asynchronous execution as the primary workload (BR-004).
+The system supports synchronous request/response invocation as a first-class feature for short-running executions, where the caller receives the result (or error) in the same API response. This mode is optional and does not replace long-running asynchronous execution as the primary workload (BR-004).
 
-Workflows MUST provide a mechanism enabling suspend and resume behavior when waiting for events, survival across service restarts, and continuation without losing progress. The system MUST support suspension periods of at least 30 days. Suspended workflows exceeding the maximum suspension duration (configurable per tenant) MUST be handled according to tenant policy: auto-cancel with notification, indefinite suspension, or escalation (BR-009).
+Workflows provide a mechanism enabling suspend and resume behavior when waiting for events, survival across service restarts, and continuation without losing progress. The system supports suspension periods of at least 30 days. Suspended workflows exceeding the maximum suspension duration (configurable per tenant) are handled according to tenant policy: auto-cancel with notification, indefinite suspension, or escalation (BR-009).
 
-Workflow definitions MUST support conditional branching and loop constructs to model complex business logic (BR-010).
+Workflow definitions support conditional branching and loop constructs to model complex business logic (BR-010).
+
+The system supports streaming inputs and outputs for long-running functions, enabling a client or another service to stream data to/from an executing function. Streaming functions are a category of asynchronous execution and are expected to receive an invocation identifier that allows later reference, checkpointing, and reconnection via durable streams.
 <!-- cpt:free:fr-summary -->
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-tenant-admin`, `cpt-serverless-runtime-actor-tenant-user`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-tenant-admin`, `cpt-cf-serverless-runtime-actor-tenant-user`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -265,19 +337,19 @@ Workflow definitions MUST support conditional branching and loop constructs to m
 ### FR-004 Trigger and Schedule Management
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p1` - **ID**: `cpt-serverless-runtime-fr-trigger-schedule`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-fr-trigger-schedule`
 
 <!-- cpt:free:fr-summary -->
-The system MUST support starting functions/workflows via three trigger modes: schedule-based triggers, API-triggered starts, and event-driven triggers (BR-007).
+The system supports starting functions/workflows via four trigger modes: schedule-based triggers, API-triggered starts, event-driven triggers, and internal invocation for helper/extended functions (BR-007).
 
-The system MUST support schedule lifecycle management (create, update, pause/resume, and delete) and MUST support a configurable policy for handling missed schedules during downtime. The system MUST support at minimum the following policies: skip (ignore missed execution), catch-up (execute once for all missed instances), and backfill (execute each missed instance individually). The default policy SHOULD be "skip" (BR-022).
+The system supports schedule lifecycle management (create, update, pause/resume, and delete) and supports a configurable policy for handling missed schedules during downtime. The system supports at minimum the following policies: skip (ignore missed execution), catch-up (execute once for all missed instances), and backfill (execute each missed instance individually). The default policy is "skip" (BR-022).
 
-The system SHOULD support defining schedule-level input parameters and overrides so that recurring executions can run with consistent defaults and can be adjusted without modifying the underlying definition (BR-110).
+The system supports defining schedule-level input parameters and overrides so that recurring executions can run with consistent defaults and can be adjusted without modifying the underlying definition (BR-110).
 <!-- cpt:free:fr-summary -->
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-tenant-admin`, `cpt-serverless-runtime-actor-tenant-user`, `cpt-serverless-runtime-actor-platform-operator`, `cpt-serverless-runtime-actor-event-broker`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-tenant-admin`, `cpt-cf-serverless-runtime-actor-tenant-user`, `cpt-cf-serverless-runtime-actor-platform-operator`, `cpt-cf-serverless-runtime-actor-event-broker`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -286,21 +358,21 @@ The system SHOULD support defining schedule-level input parameters and overrides
 ### FR-005 Runtime Capabilities and Adapter Integration
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p1` - **ID**: `cpt-serverless-runtime-fr-runtime-capabilities`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-fr-runtime-capabilities`
 
 <!-- cpt:free:fr-summary -->
-Workflows and functions MUST be able to invoke runtime-provided capabilities needed for business automation (BR-008):
+Workflows and functions are able to invoke runtime-provided capabilities needed for business automation (BR-008):
 
 - Making outbound HTTP requests
 - Emitting or publishing business events
 - Writing to audit logs
 - Invoking platform-provided operations required for orchestration
 
-The system MUST support runtime registration of workflow/function definitions from Infrastructure Adapters with the following characteristics (BR-035):
+The system supports runtime registration of workflow/function definitions from Infrastructure Adapters with the following characteristics (BR-035):
 
-- Hot-plug registration without requiring platform restart
+- Hot-plug registration without requiring platform restart, including hot reloading of native executor modules
 - Per-tenant workflow definition registration; adapters connected to one tenant MUST NOT affect other tenants
-- Flexible infrastructure models: adapters MAY use either per-tenant infrastructure (dedicated resources) or shared infrastructure (multi-tenant resources) based on configuration
+- Flexible infrastructure models: adapters can use either per-tenant infrastructure (dedicated resources) or shared infrastructure (multi-tenant resources) based on configuration
 - Tenant isolation enforcement: regardless of infrastructure model, tenant isolation MUST be enforced at the execution and data level
 
 When an integration adapter or external dependency is disconnected, the system MUST reject new workflow/function starts that depend on the disconnected component and allow in-flight executions to complete or fail gracefully (BR-136).
@@ -308,7 +380,7 @@ When an integration adapter or external dependency is disconnected, the system M
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-platform-operator`, `cpt-serverless-runtime-actor-outbound-api-gw`, `cpt-serverless-runtime-actor-types-registry`, `cpt-serverless-runtime-actor-infra-adapter`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-platform-operator`, `cpt-cf-serverless-runtime-actor-outbound-api-gw`, `cpt-cf-serverless-runtime-actor-types-registry`, `cpt-cf-serverless-runtime-actor-infra-adapter`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -317,14 +389,14 @@ When an integration adapter or external dependency is disconnected, the system M
 ### FR-006 Execution Lifecycle and Resilience
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p1` - **ID**: `cpt-serverless-runtime-fr-execution-lifecycle`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-fr-execution-lifecycle`
 
 <!-- cpt:free:fr-summary -->
-The system MUST support lifecycle management for workflows/functions and their executions, including the ability to: start executions, cancel or terminate executions, retry failed executions, suspend and resume executions, and apply compensation behavior on cancellation where applicable (BR-014).
+The system supports lifecycle management for workflows/functions and their executions, including the ability to: start executions, cancel or terminate executions, retry failed executions, suspend and resume executions, and apply compensation behavior on cancellation where applicable (BR-014).
 
-The system MUST support configurable retry and failure-handling policies including: maximum retry attempts, backoff behavior, and classification of non-retryable failures (BR-019).
+The system supports configurable retry and failure-handling policies including: maximum retry attempts, backoff behavior, and classification of non-retryable failures (BR-019).
 
-The system MUST provide dead letter handling for executions that repeatedly fail after all retry attempts, ensuring failed executions are preserved for analysis and manual recovery (BR-027).
+The system provides dead letter handling for executions that repeatedly fail after all retry attempts, ensuring failed executions are preserved for analysis and manual recovery (BR-027).
 
 The system MUST enforce a maximum execution duration guardrail to prevent infinite or runaway executions. This guardrail MUST be configurable per tenant and workflow/function and MUST apply even if higher timeouts are requested (BR-028).
 
@@ -336,12 +408,12 @@ The system MUST support configurable execution timeouts at both the workflow/fun
 
 The system MUST monitor and terminate executions that consume excessive resources relative to configured limits, including detection of CPU spinning, memory leaks, and excessive I/O. Terminated executions MUST be logged with detailed resource consumption metrics (BR-040).
 
-The system SHOULD support controlled interaction with in-flight executions, including the ability for authorized actors to provide external signals/inputs for event-driven continuation and to perform manual intervention actions needed to resolve operational issues (BR-108).
+The system supports controlled interaction with in-flight executions, including the ability for authorized actors to provide external signals/inputs for event-driven continuation and to perform manual intervention actions needed to resolve operational issues (BR-108).
 <!-- cpt:free:fr-summary -->
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-tenant-admin`, `cpt-serverless-runtime-actor-tenant-user`, `cpt-serverless-runtime-actor-platform-operator`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-tenant-admin`, `cpt-cf-serverless-runtime-actor-tenant-user`, `cpt-cf-serverless-runtime-actor-platform-operator`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -350,22 +422,22 @@ The system SHOULD support controlled interaction with in-flight executions, incl
 ### FR-007 Execution Visibility and Querying
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p1` - **ID**: `cpt-serverless-runtime-fr-execution-visibility`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-fr-execution-visibility`
 
 <!-- cpt:free:fr-summary -->
-The system MUST provide an interface for authorized users/operators to (BR-015):
+The system provides an interface for authorized users/operators to (BR-015):
 
 - List available workflow/function definitions in their scope
 - List executions and their current status
 - Inspect execution history and the current/pending step
 - Filter/search by tenant, initiator, time range, status, and correlation identifier
 
-The system MUST provide lifecycle controls for individual executions including: querying execution status until completion, canceling an in-flight execution, and replaying an execution for controlled recovery and incident analysis (BR-128).
+The system provides lifecycle controls for individual executions including: querying execution status until completion, canceling an in-flight execution, and replaying an execution for controlled recovery and incident analysis (BR-128).
 <!-- cpt:free:fr-summary -->
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-tenant-admin`, `cpt-serverless-runtime-actor-tenant-user`, `cpt-serverless-runtime-actor-platform-operator`, `cpt-serverless-runtime-actor-audit-engine`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-tenant-admin`, `cpt-cf-serverless-runtime-actor-tenant-user`, `cpt-cf-serverless-runtime-actor-platform-operator`, `cpt-cf-serverless-runtime-actor-audit-engine`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -374,7 +446,7 @@ The system MUST provide lifecycle controls for individual executions including: 
 ### FR-008 Input Validation and Security Enforcement
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p1` - **ID**: `cpt-serverless-runtime-fr-input-security`
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-fr-input-security`
 
 <!-- cpt:free:fr-summary -->
 The system MUST validate all workflow/function inputs against defined schemas before execution begins, including type validation, range and format validation, and detection and rejection of excessive payload sizes. Invalid inputs MUST be rejected with clear error messages (BR-037).
@@ -386,7 +458,7 @@ The system MUST prevent privilege escalation through input manipulation: inputs 
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-tenant-admin`, `cpt-serverless-runtime-actor-tenant-user`, `cpt-serverless-runtime-actor-types-registry`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-tenant-admin`, `cpt-cf-serverless-runtime-actor-tenant-user`, `cpt-cf-serverless-runtime-actor-types-registry`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -395,23 +467,23 @@ The system MUST prevent privilege escalation through input manipulation: inputs 
 ### FR-009 Debugging and Operational Tooling
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p2` - **ID**: `cpt-serverless-runtime-fr-debugging`
+- [ ] `p2` - **ID**: `cpt-cf-serverless-runtime-fr-debugging`
 
 <!-- cpt:free:fr-summary -->
-The platform MUST provide a way to debug workflow executions, including setting breakpoints, logging each action/function call with input parameters and return values, and retaining sufficient execution history to troubleshoot failures (BR-101).
+The platform provides a way to debug workflow executions, including setting breakpoints, logging each action/function call with input parameters and return values, and retaining sufficient execution history to troubleshoot failures (BR-101).
 
-The platform SHOULD provide step-through capabilities for workflow execution to support troubleshooting and controlled execution (BR-102).
+The platform provides step-through capabilities for workflow execution to support troubleshooting and controlled execution (BR-102).
 
-The system SHOULD support a dry-run mode for workflows/functions that validates execution readiness (definition validity, permissions, configured limits) using user-provided input. Dry-run MUST NOT create a durable execution record and MUST NOT cause external side effects (BR-103).
+The system supports a dry-run mode for workflows/functions that validates execution readiness (definition validity, permissions, configured limits) using user-provided input. Dry-run does not create a durable execution record and does not cause external side effects (BR-103).
 
-The system MUST provide a debug view for an execution that includes an ordered list of invoked calls with input parameters, execution duration per call, and the exact call response (result or error). The debug view MUST NOT expose secrets; sensitive inputs/outputs MUST be masked by default unless explicitly permitted (BR-130).
+The system provides a debug view for an execution that includes an ordered list of invoked calls with input parameters, execution duration per call, and the exact call response (result or error). The debug view MUST NOT expose secrets; sensitive inputs/outputs MUST be masked by default unless explicitly permitted (BR-130).
 
-The system MUST expose a standardized error taxonomy for workflow/function execution failures, including upstream HTTP/integration failures, runtime/environment failures (timeouts, resource limits), and code execution and validation failures. Errors MUST include a stable error identifier, a human-readable message, and a structured details object (BR-129).
+The system exposes a standardized error taxonomy for workflow/function execution failures, including upstream HTTP/integration failures, runtime/environment failures (timeouts, resource limits), and code execution and validation failures. Errors include a stable error identifier, a human-readable message, and a structured details object (BR-129).
 <!-- cpt:free:fr-summary -->
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-platform-operator`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-platform-operator`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -420,21 +492,21 @@ The system MUST expose a standardized error taxonomy for workflow/function execu
 ### FR-010 Advanced Execution Patterns
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p2` - **ID**: `cpt-serverless-runtime-fr-advanced-patterns`
+- [ ] `p2` - **ID**: `cpt-cf-serverless-runtime-fr-advanced-patterns`
 
 <!-- cpt:free:fr-summary -->
-The system SHOULD support invoking child workflows/functions from a parent workflow for modular composition and reuse (BR-104).
+The system supports invoking child workflows/functions from a parent workflow for modular composition and reuse (BR-104).
 
-The system SHOULD support parallel execution of independent steps/functions within a workflow, with controllable concurrency caps and configurable concurrency limits (BR-105).
+The system supports parallel execution of independent steps/functions within a workflow, with controllable concurrency caps and configurable concurrency limits (BR-105).
 
-The system MUST provide built-in support for saga-style orchestration, including compensation logic to reverse the effects of completed steps when a workflow cannot complete successfully (BR-133).
+The system provides built-in support for saga-style orchestration, including compensation logic to reverse the effects of completed steps when a workflow cannot complete successfully (BR-133).
 
-The platform MUST provide mechanisms to implement idempotency for workflow/function execution. The system SHOULD support common idempotency patterns including idempotency keys, deduplication windows, and correlation identifiers to track and deduplicate requests (BR-134).
+The platform provides mechanisms to implement idempotency for workflow/function execution. The system supports common idempotency patterns including idempotency keys, deduplication windows, and correlation identifiers to track and deduplicate requests (BR-134).
 <!-- cpt:free:fr-summary -->
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`
+`cpt-cf-serverless-runtime-actor-app-developer`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -443,19 +515,19 @@ The platform MUST provide mechanisms to implement idempotency for workflow/funct
 ### FR-011 Governance, Sharing, and Notifications
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p2` - **ID**: `cpt-serverless-runtime-fr-governance-sharing`
+- [ ] `p2` - **ID**: `cpt-cf-serverless-runtime-fr-governance-sharing`
 
 <!-- cpt:free:fr-summary -->
-The system SHOULD support governance controls for workflow/function changes (such as review/approval and controlled activation) to reduce operational risk and support compliance (BR-122).
+The system supports configurable governance controls for workflow/function changes (such as review/approval and controlled activation) to reduce operational risk and support compliance (BR-122).
 
-The system SHOULD support sharing of workflow/function definitions beyond the default ownership scope, enabling authorized actors to grant discovery and execution access to other users, groups, or tenants. Sharing capabilities SHOULD be extensible — concrete mechanisms (group-based sharing, cross-tenant federation, marketplace publishing) MAY be implemented as external modules or plugins. The system MUST NOT require a specific sharing implementation to be embedded in the core runtime (BR-123).
+The system supports sharing of workflow/function definitions beyond the default ownership scope, enabling authorized actors to grant discovery and execution access to other users, groups, or tenants. Sharing capabilities are extensible — concrete mechanisms (group-based sharing, cross-tenant federation, marketplace publishing) can be implemented as external modules or plugins. The system does not require a specific sharing implementation to be embedded in the core runtime (BR-123).
 
-The system SHOULD support notifying authorized users/operators about important workflow/function events, including failures, repeated retries, and abnormal execution duration, to reduce time-to-detection and time-to-recovery (BR-109).
+The system supports notifying authorized users/operators about important workflow/function events, including failures, repeated retries, and abnormal execution duration, to reduce time-to-detection and time-to-recovery (BR-109).
 <!-- cpt:free:fr-summary -->
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-tenant-admin`, `cpt-serverless-runtime-actor-platform-operator`, `cpt-serverless-runtime-actor-event-broker`
+`cpt-cf-serverless-runtime-actor-tenant-admin`, `cpt-cf-serverless-runtime-actor-platform-operator`, `cpt-cf-serverless-runtime-actor-event-broker`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -464,17 +536,17 @@ The system SHOULD support notifying authorized users/operators about important w
 ### FR-012 Execution Replay and Visualization
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p2` - **ID**: `cpt-serverless-runtime-fr-replay-visualization`
+- [ ] `p2` - **ID**: `cpt-cf-serverless-runtime-fr-replay-visualization`
 
 <!-- cpt:free:fr-summary -->
-The system SHOULD support replaying an execution from a recorded history or saved state, to support debugging, incident analysis, and controlled recovery (BR-124).
+The system supports replaying an execution from a recorded history or saved state, to support debugging, incident analysis, and controlled recovery (BR-124).
 
-The system SHOULD make it easy for authorized users to visualize workflow structure (execution blocks and decisions/branches) and to understand which path is taken for a given execution (BR-125).
+The system makes it easy for authorized users to visualize workflow structure (execution blocks and decisions/branches) and to understand which path is taken for a given execution (BR-125).
 <!-- cpt:free:fr-summary -->
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-tenant-admin`, `cpt-serverless-runtime-actor-tenant-user`, `cpt-serverless-runtime-actor-platform-operator`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-tenant-admin`, `cpt-cf-serverless-runtime-actor-tenant-user`, `cpt-cf-serverless-runtime-actor-platform-operator`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -483,23 +555,23 @@ The system SHOULD make it easy for authorized users to visualize workflow struct
 ### FR-013 Advanced Deployment and Portability
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p3` - **ID**: `cpt-serverless-runtime-fr-advanced-deployment`
+- [ ] `p3` - **ID**: `cpt-cf-serverless-runtime-fr-advanced-deployment`
 
 <!-- cpt:free:fr-summary -->
-The system SHOULD support importing and exporting workflow/function definitions to enable backup, migration, and cross-environment management (BR-202).
+The system supports importing and exporting workflow/function definitions to enable backup, migration, and cross-environment management (BR-202).
 
-The system SHOULD support execution time travel from historical states for debugging and compliance investigation purposes (BR-203).
+The system supports execution time travel from historical states for debugging and compliance investigation purposes (BR-203).
 
-The system SHOULD support A/B testing of workflow/function versions to validate changes before full deployment (BR-204).
+The system supports A/B testing of workflow/function versions to validate changes before full deployment (BR-204).
 
-The system SHOULD support canary release patterns for gradual rollout of workflow/function updates (BR-205).
+The system supports canary release patterns for gradual rollout of workflow/function updates (BR-205).
 
-The system SHOULD support long-term archival of execution history and audit records for tenants with extended compliance and reporting requirements (BR-201).
+The system supports long-term archival of execution history and audit records for tenants with extended compliance and reporting requirements (BR-201).
 <!-- cpt:free:fr-summary -->
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-tenant-admin`, `cpt-serverless-runtime-actor-platform-operator`
+`cpt-cf-serverless-runtime-actor-tenant-admin`, `cpt-cf-serverless-runtime-actor-platform-operator`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
@@ -508,33 +580,219 @@ The system SHOULD support long-term archival of execution history and audit reco
 ### FR-014 Deployment Safety
 
 <!-- cpt:id:fr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p2` - **ID**: `cpt-serverless-runtime-fr-deployment-safety`
+- [ ] `p2` - **ID**: `cpt-cf-serverless-runtime-fr-deployment-safety`
 
 <!-- cpt:free:fr-summary -->
-The system SHOULD support blue-green deployment strategies for workflow/function updates to minimize risk during changes (BR-121).
+The system supports blue-green deployment strategies for workflow/function updates to minimize risk during changes (BR-121).
 <!-- cpt:free:fr-summary -->
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-tenant-admin`, `cpt-serverless-runtime-actor-platform-operator`
+`cpt-cf-serverless-runtime-actor-tenant-admin`, `cpt-cf-serverless-runtime-actor-platform-operator`
 <!-- cpt:id-ref:actor -->
 <!-- cpt:id:fr -->
 <!-- cpt:###:fr-title repeat="many" -->
 
 <!-- cpt:##:frs -->
 
+
+<!-- cpt:##:nfrs -->
+## 4. Non-Functional Requirements
+
+<!-- cpt:###:nfr-title repeat="many" -->
+### Security and Access Control
+
+<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-nfr-security`
+
+<!-- cpt:list:nfr-statements -->
+- Functions/workflows support being executed under a system account, an API client context, or a user context (BR-006)
+- For long-running workflows, the system supports automatic refresh of initiator/caller authentication tokens or credentials ensuring workflows do not fail due to token expiration and security context remains valid and auditable (BR-013)
+- The system enforces authenticated and authorized access to all workflow/function management and execution operations and fails closed on authorization failures. The system supports separation of duties (author vs execute vs administer) (BR-016)
+- The system protects workflow/function definitions, execution state, and audit records with data protection controls including: protection at rest and in transit, minimization of sensitive data exposure in logs and execution history, and controls for handling sensitive inputs/outputs (BR-017)
+- The system ensures audit records are protected from unauthorized modification and deletion and are available for compliance review within the configured retention period (BR-023)
+- The system ensures the execution security context is available throughout the lifetime of an execution and to every workflow/function step so that all actions are attributable, authorized, and auditable (BR-024)
+- The system supports secure handling of secrets ensuring: no exposure via logs/history/debugging, access restricted to authorized actors, integration with platform secret management, and secrets MUST NOT be persisted in plaintext (BR-025)
+- The system MUST ensure definitions, execution state, and execution history are encrypted at rest and all network communication encrypted in transit (BR-033)
+- The system maintains a complete audit trail for definition lifecycle events and execution lifecycle events. Audit records identify tenant, actor, and correlation identifier (BR-034)
+- The system enforces access control for debugging capabilities respecting tenant isolation, with audit trail for cross-tenant operations, and sensitive data masked by default (BR-127)
+<!-- cpt:list:nfr-statements -->
+<!-- cpt:id:nfr -->
+<!-- cpt:###:nfr-title repeat="many" -->
+
+<!-- cpt:###:nfr-title repeat="many" -->
+### Resource Governance
+
+<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-nfr-resource-governance`
+
+<!-- cpt:list:nfr-statements -->
+- The system supports defining and enforcing resource limits for execution including CPU limits and memory limits. The implementation will support the use of runtime-controlled resource isolation or OS-level resource isolation based on architectural requirements (BR-005)
+- The system supports defining resource limits at the individual definition level including: maximum concurrent executions, maximum memory allocation per execution, and maximum CPU allocation per execution (BR-012)
+- The system supports per-tenant resource quotas including: maximum total concurrent executions per tenant and maximum execution history retention size per tenant (BR-106)
+- The system supports configurable limits on execution frequency and total execution volume over time to prevent abuse and ensure fair resource allocation across tenants (BR-116)
+- The system supports throttling of execution starts to protect downstream systems and prevent resource exhaustion under high load (BR-113)
+- The system provides an optional Host-Worker isolation mode so that the runtime host and individual function/workflow workers operate in separate execution contexts, preventing a misbehaving worker from affecting the host or other workers
+<!-- cpt:list:nfr-statements -->
+<!-- cpt:id:nfr -->
+<!-- cpt:###:nfr-title repeat="many" -->
+
+<!-- cpt:###:nfr-title repeat="many" -->
+### Reliability and State Consistency
+
+<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-nfr-reliability`
+
+<!-- cpt:list:nfr-statements -->
+- The system ensures workflow/function state remains consistent during concurrent operations and system failures with no partial updates or corrupted states (BR-026)
+- Runtime service availability meets or exceeds 99.95% monthly
+- Excluding business-logic failures, the platform achieves ≥ 99.9% completion success via retries/compensation
+- Recovery objectives target RTO ≤ 30 seconds and RPO ≤ 1 minute for execution state
+- Under normal load and with no external dependencies, scheduled executions start within 1 second of their scheduled time
+<!-- cpt:list:nfr-statements -->
+<!-- cpt:id:nfr -->
+<!-- cpt:###:nfr-title repeat="many" -->
+
+<!-- cpt:###:nfr-title repeat="many" -->
+### Operational Traceability
+
+<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
+- [ ] `p1` - **ID**: `cpt-cf-serverless-runtime-nfr-ops-traceability`
+
+<!-- cpt:list:nfr-statements -->
+- The system ensures tenant identifiers and correlation identifiers are consistently present across audit records, logs, and operational metrics (BR-021)
+- The system provides operational metrics including volume, latency, error rates, and queue/backlog indicators, with segmentation by tenant (BR-135)
+<!-- cpt:list:nfr-statements -->
+<!-- cpt:id:nfr -->
+<!-- cpt:###:nfr-title repeat="many" -->
+
+<!-- cpt:###:nfr-title repeat="many" -->
+### Observability and Metrics
+
+<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
+- [ ] `p2` - **ID**: `cpt-cf-serverless-runtime-nfr-observability`
+
+<!-- cpt:list:nfr-statements -->
+- The system provides distributed tracing capabilities that follow execution across multiple services and external system calls (BR-115)
+- The system provides execution-level compute and memory metrics including wall-clock duration, CPU time, memory usage and limits (BR-131)
+- The system provides pre-built monitoring dashboards for common operational metrics and health indicators (BR-119)
+- The system supports performance profiling of executions to identify bottlenecks (BR-120)
+<!-- cpt:list:nfr-statements -->
+<!-- cpt:id:nfr -->
+<!-- cpt:###:nfr-title repeat="many" -->
+
+<!-- cpt:###:nfr-title repeat="many" -->
+### Retention and Compliance
+
+<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
+- [ ] `p2` - **ID**: `cpt-cf-serverless-runtime-nfr-retention`
+
+<!-- cpt:list:nfr-statements -->
+- The system supports configurable retention policies for execution history and audit records including tenant-level defaults and deletion policies aligned to contractual and compliance needs (BR-107)
+- The system provides a default retention period for execution history; the default is expected to be 7 days and is configurable per tenant and/or per function type (BR-126)
+- The system provides metering of resource consumption per tenant and per workflow/function to support cost allocation and billing (BR-111)
+- Audit trails and tenant isolation support SOC 2-aligned controls
+<!-- cpt:list:nfr-statements -->
+<!-- cpt:id:nfr -->
+<!-- cpt:###:nfr-title repeat="many" -->
+
+<!-- cpt:###:nfr-title repeat="many" -->
+### Performance
+
+<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
+- [ ] `p2` - **ID**: `cpt-cf-serverless-runtime-nfr-performance`
+
+<!-- cpt:list:nfr-statements -->
+- Under normal load, workflow start latency targets p95 ≤ 100ms from start request to first step scheduling (BR-207)
+- Under normal load, step dispatch latency targets p95 ≤ 50ms from step scheduled to execution start (BR-207)
+- Under normal load, monitoring query latency targets p95 ≤ 200ms for execution state/history queries (BR-207)
+- Runtime overhead SHOULD be ≤ 10ms per step excluding business logic (BR-207)
+- Execution timeouts per FR-006 (BR-112)
+- The system supports customizing execution environment settings (time zones, locale, regional compliance) per tenant (BR-117)
+- The system supports caching of execution results for idempotent operations with configurable TTL to improve performance and reduce redundant processing (BR-118, BR-132)
+<!-- cpt:list:nfr-statements -->
+<!-- cpt:id:nfr -->
+<!-- cpt:###:nfr-title repeat="many" -->
+
+<!-- cpt:###:nfr-title repeat="many" -->
+### Composition Dependencies
+
+<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
+- [ ] `p2` - **ID**: `cpt-cf-serverless-runtime-nfr-composition-deps`
+
+<!-- cpt:list:nfr-statements -->
+- The system supports declaring and managing dependencies between workflows/functions to ensure proper deployment order and compatibility (BR-114)
+<!-- cpt:list:nfr-statements -->
+<!-- cpt:id:nfr -->
+<!-- cpt:###:nfr-title repeat="many" -->
+
+<!-- cpt:###:nfr-title repeat="many" -->
+### Scalability
+
+<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
+- [ ] `p3` - **ID**: `cpt-cf-serverless-runtime-nfr-scalability`
+
+<!-- cpt:list:nfr-statements -->
+- The system targets supporting ≥ 10,000 concurrent executions per region under normal load (BR-208)
+- The system targets supporting sustained workflow starts ≥ 1,000/sec per region under normal load (BR-208)
+- The system targets supporting ≥ 100,000 workflow executions/day initially with a growth plan to ≥ 1,000,000/day (BR-208)
+- The system targets supporting ≥ 1,000 tenants with a clear partitioning/isolation strategy (BR-208)
+- The system targets supporting ≥ 10,000 registered workflow definitions across tenants including per-tenant hot-plug (BR-208)
+<!-- cpt:list:nfr-statements -->
+<!-- cpt:id:nfr -->
+<!-- cpt:###:nfr-title repeat="many" -->
+
+<!-- cpt:###:nfr-title repeat="many" -->
+### Tenant Isolation
+
+<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
+- [ ] `p3` - **ID**: `cpt-cf-serverless-runtime-nfr-tenant-isolation`
+
+<!-- cpt:list:nfr-statements -->
+- The system provides isolation boundaries for execution to ensure one tenant's code cannot affect another tenant's environment and resource consumption does not negatively impact other executions (noisy neighbor prevention) (BR-206)
+<!-- cpt:list:nfr-statements -->
+<!-- cpt:id:nfr -->
+<!-- cpt:###:nfr-title repeat="many" -->
+
+<!-- cpt:###:intentional-exclusions -->
+### Intentional Exclusions
+
+<!-- cpt:list:exclusions -->
+- **Usability / UX** (UX-PRD-001, UX-PRD-002, UX-PRD-003, UX-PRD-004, UX-PRD-005): Not applicable — this is a platform runtime capability, not a user-facing application; consumers interact via APIs and programmatic interfaces, not graphical UIs
+- **Visual Workflow Designer UI**: Explicitly out of scope as a future capability; the PRD covers the runtime engine and APIs only
+- **External Marketplace**: Explicitly out of scope; sharing is supported via extensible mechanisms (BR-123) but marketplace is not in scope
+- **Privacy by Design** (SEC-PRD-005): Not directly applicable at the PRD level — the serverless runtime processes tenant automation logic, not end-user PII; data protection controls (BR-017, BR-025) address sensitive data handling within executions
+- **Safety** (SAFE-PRD-001, SAFE-PRD-002): Not applicable — this is a software automation runtime with no physical interaction, medical, or industrial control implications
+<!-- cpt:list:exclusions -->
+<!-- cpt:###:intentional-exclusions -->
+<!-- cpt:##:nfrs -->
+
+
+## Public Library Interfaces
+
+The Serverless Runtime exposes its capabilities through the following interface categories. Detailed API contracts are defined in `DESIGN.md`.
+
+- **Function Management API**: CRUD operations for function and workflow definitions, including versioning and lifecycle state management
+- **Invocation API**: Synchronous and asynchronous invocation of functions with typed input/output
+- **Schedule Management API**: Create, update, pause/resume, and delete recurring triggers
+- **Trigger Management API**: Event-driven and webhook trigger configuration
+- **Execution Query API**: List, filter, and inspect executions, their status, history, and timeline events
+- **Execution Lifecycle API**: Cancel, retry, suspend, resume, and replay executions
+- **Tenant Policy API**: Configure tenant-level governance, quotas, retention, and allowed runtimes
+- **SDK Trait** (`ServerlessRuntime`): Abstract trait implemented by executor adapters for pluggable runtime support
+
 <!-- cpt:##:usecases -->
-## 4. Use Cases
+## 5. Use Cases
 
 <!-- cpt:###:uc-title repeat="many" -->
 ### UC-001 Resource Provisioning with Rollback
 
 <!-- cpt:id:usecase -->
-**ID**: `cpt-serverless-runtime-usecase-resource-provisioning`
+**ID**: `cpt-cf-serverless-runtime-usecase-resource-provisioning`
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`
+`cpt-cf-serverless-runtime-actor-app-developer`
 <!-- cpt:id-ref:actor -->
 
 <!-- cpt:paragraph:preconditions -->
@@ -571,11 +829,11 @@ The system SHOULD support blue-green deployment strategies for workflow/function
 ### UC-002 Tenant Onboarding with External Approvals
 
 <!-- cpt:id:usecase -->
-**ID**: `cpt-serverless-runtime-usecase-tenant-onboarding`
+**ID**: `cpt-cf-serverless-runtime-usecase-tenant-onboarding`
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-tenant-admin`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-tenant-admin`
 <!-- cpt:id-ref:actor -->
 
 <!-- cpt:paragraph:preconditions -->
@@ -612,11 +870,11 @@ The system SHOULD support blue-green deployment strategies for workflow/function
 ### UC-003 Subscription Lifecycle Management
 
 <!-- cpt:id:usecase -->
-**ID**: `cpt-serverless-runtime-usecase-subscription-lifecycle`
+**ID**: `cpt-cf-serverless-runtime-usecase-subscription-lifecycle`
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-tenant-admin`
+`cpt-cf-serverless-runtime-actor-tenant-admin`
 <!-- cpt:id-ref:actor -->
 
 <!-- cpt:paragraph:preconditions -->
@@ -652,11 +910,11 @@ The system SHOULD support blue-green deployment strategies for workflow/function
 ### UC-004 Policy Enforcement and Remediation
 
 <!-- cpt:id:usecase -->
-**ID**: `cpt-serverless-runtime-usecase-policy-enforcement`
+**ID**: `cpt-cf-serverless-runtime-usecase-policy-enforcement`
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-platform-operator`, `cpt-serverless-runtime-actor-event-broker`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-platform-operator`, `cpt-cf-serverless-runtime-actor-event-broker`
 <!-- cpt:id-ref:actor -->
 
 <!-- cpt:paragraph:preconditions -->
@@ -692,11 +950,11 @@ The system SHOULD support blue-green deployment strategies for workflow/function
 ### UC-005 Adapter Hot-Plug Registration
 
 <!-- cpt:id:usecase -->
-**ID**: `cpt-serverless-runtime-usecase-adapter-hotplug`
+**ID**: `cpt-cf-serverless-runtime-usecase-adapter-hotplug`
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-platform-operator`, `cpt-serverless-runtime-actor-infra-adapter`
+`cpt-cf-serverless-runtime-actor-platform-operator`, `cpt-cf-serverless-runtime-actor-infra-adapter`
 <!-- cpt:id-ref:actor -->
 
 <!-- cpt:paragraph:preconditions -->
@@ -733,11 +991,11 @@ The system SHOULD support blue-green deployment strategies for workflow/function
 ### UC-006 Debugging a Failed Workflow Execution
 
 <!-- cpt:id:usecase -->
-**ID**: `cpt-serverless-runtime-usecase-debug-execution`
+**ID**: `cpt-cf-serverless-runtime-usecase-debug-execution`
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-platform-operator`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-platform-operator`
 <!-- cpt:id-ref:actor -->
 
 <!-- cpt:paragraph:preconditions -->
@@ -772,11 +1030,11 @@ The system SHOULD support blue-green deployment strategies for workflow/function
 ### UC-007 Data Migration with Checkpoint/Resume
 
 <!-- cpt:id:usecase -->
-**ID**: `cpt-serverless-runtime-usecase-data-migration`
+**ID**: `cpt-cf-serverless-runtime-usecase-data-migration`
 
 **Actors**:
 <!-- cpt:id-ref:actor -->
-`cpt-serverless-runtime-actor-app-developer`, `cpt-serverless-runtime-actor-tenant-admin`
+`cpt-cf-serverless-runtime-actor-app-developer`, `cpt-cf-serverless-runtime-actor-tenant-admin`
 <!-- cpt:id-ref:actor -->
 
 <!-- cpt:paragraph:preconditions -->
@@ -810,318 +1068,9 @@ The system SHOULD support blue-green deployment strategies for workflow/function
 
 <!-- cpt:##:usecases -->
 
-<!-- cpt:##:nfrs -->
-## 5. Non-functional requirements
 
-<!-- cpt:###:nfr-title repeat="many" -->
-### Security and Access Control
+## Acceptance Criteria
 
-<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p1` - **ID**: `cpt-serverless-runtime-nfr-security`
-
-<!-- cpt:list:nfr-statements -->
-- Functions/workflows MUST support being executed under a system account, an API client context, or a user context (BR-006)
-- For long-running workflows, the system MUST support automatic refresh of initiator/caller authentication tokens or credentials ensuring workflows do not fail due to token expiration and security context remains valid and auditable (BR-013)
-- The system MUST enforce authenticated and authorized access to all workflow/function management and execution operations and MUST fail closed on authorization failures. The system SHOULD support separation of duties (author vs execute vs administer) (BR-016)
-- The system MUST protect workflow/function definitions, execution state, and audit records with data protection controls including: protection at rest and in transit, minimization of sensitive data exposure in logs and execution history, and controls for handling sensitive inputs/outputs (BR-017)
-- The system MUST ensure audit records are protected from unauthorized modification and deletion and are available for compliance review within the configured retention period (BR-023)
-- The system MUST ensure the execution security context is available throughout the lifetime of an execution and to every workflow/function step so that all actions are attributable, authorized, and auditable (BR-024)
-- The system MUST support secure handling of secrets ensuring: no exposure via logs/history/debugging, access restricted to authorized actors, integration with platform secret management, and secrets NEVER persisted in plaintext (BR-025)
-- The system MUST ensure definitions, execution state, and execution history are encrypted at rest and all network communication encrypted in transit (BR-033)
-- The system MUST maintain a complete audit trail for definition lifecycle events and execution lifecycle events. Audit records MUST identify tenant, actor, and correlation identifier (BR-034)
-- The system MUST enforce access control for debugging capabilities respecting tenant isolation, with audit trail for cross-tenant operations, and sensitive data masked by default (BR-127)
-<!-- cpt:list:nfr-statements -->
-<!-- cpt:id:nfr -->
-<!-- cpt:###:nfr-title repeat="many" -->
-
-<!-- cpt:###:nfr-title repeat="many" -->
-### Resource Governance
-
-<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p1` - **ID**: `cpt-serverless-runtime-nfr-resource-governance`
-
-<!-- cpt:list:nfr-statements -->
-- The system MUST support defining and enforcing resource limits for execution including CPU limits and memory limits. The implementation MAY use runtime-controlled resource isolation or OS-level resource isolation based on architectural decisions (BR-005)
-- The system MUST support defining resource limits at the individual definition level including: maximum concurrent executions, maximum memory allocation per execution, and maximum CPU allocation per execution (BR-012)
-- The system MUST support per-tenant resource quotas including: maximum total concurrent executions per tenant and maximum execution history retention size per tenant (BR-106)
-- The system MUST support configurable limits on execution frequency and total execution volume over time to prevent abuse and ensure fair resource allocation across tenants (BR-116)
-- The system SHOULD support throttling of execution starts to protect downstream systems and prevent resource exhaustion under high load (BR-113)
-<!-- cpt:list:nfr-statements -->
-<!-- cpt:id:nfr -->
-<!-- cpt:###:nfr-title repeat="many" -->
-
-<!-- cpt:###:nfr-title repeat="many" -->
-### Reliability and State Consistency
-
-<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p1` - **ID**: `cpt-serverless-runtime-nfr-reliability`
-
-<!-- cpt:list:nfr-statements -->
-- The system MUST ensure workflow/function state remains consistent during concurrent operations and system failures with no partial updates or corrupted states (BR-026)
-- Runtime service availability MUST meet or exceed 99.95% monthly
-- Excluding business-logic failures, the platform MUST achieve ≥ 99.9% completion success via retries/compensation
-- Recovery objectives MUST target RTO ≤ 30 seconds and RPO ≤ 1 minute for execution state
-- Under normal load and with no external dependencies, scheduled executions MUST start within 1 second of their scheduled time
-<!-- cpt:list:nfr-statements -->
-<!-- cpt:id:nfr -->
-<!-- cpt:###:nfr-title repeat="many" -->
-
-<!-- cpt:###:nfr-title repeat="many" -->
-### Operational Traceability
-
-<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p1` - **ID**: `cpt-serverless-runtime-nfr-ops-traceability`
-
-<!-- cpt:list:nfr-statements -->
-- The system MUST ensure tenant identifiers and correlation identifiers are consistently present across audit records, logs, and operational metrics (BR-021)
-- The system MUST provide operational metrics including volume, latency, error rates, and queue/backlog indicators, with segmentation by tenant (BR-135)
-<!-- cpt:list:nfr-statements -->
-<!-- cpt:id:nfr -->
-<!-- cpt:###:nfr-title repeat="many" -->
-
-<!-- cpt:###:nfr-title repeat="many" -->
-### Observability and Metrics
-
-<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p2` - **ID**: `cpt-serverless-runtime-nfr-observability`
-
-<!-- cpt:list:nfr-statements -->
-- The system SHOULD provide distributed tracing capabilities that follow execution across multiple services and external system calls (BR-115)
-- The system SHOULD provide execution-level compute and memory metrics including wall-clock duration, CPU time, memory usage and limits (BR-131)
-- The system SHOULD provide pre-built monitoring dashboards for common operational metrics and health indicators (BR-119)
-- The system SHOULD support performance profiling of executions to identify bottlenecks (BR-120)
-<!-- cpt:list:nfr-statements -->
-<!-- cpt:id:nfr -->
-<!-- cpt:###:nfr-title repeat="many" -->
-
-<!-- cpt:###:nfr-title repeat="many" -->
-### Retention and Compliance
-
-<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p2` - **ID**: `cpt-serverless-runtime-nfr-retention`
-
-<!-- cpt:list:nfr-statements -->
-- The system MUST support configurable retention policies for execution history and audit records including tenant-level defaults and deletion policies aligned to contractual and compliance needs (BR-107)
-- The system MUST provide a default retention period for execution history; the default SHOULD be 7 days and MUST be configurable per tenant and/or per function type (BR-126)
-- The system MUST provide metering of resource consumption per tenant and per workflow/function to support cost allocation and billing (BR-111)
-- Audit trails and tenant isolation MUST support SOC 2-aligned controls
-<!-- cpt:list:nfr-statements -->
-<!-- cpt:id:nfr -->
-<!-- cpt:###:nfr-title repeat="many" -->
-
-<!-- cpt:###:nfr-title repeat="many" -->
-### Performance
-
-<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p2` - **ID**: `cpt-serverless-runtime-nfr-performance`
-
-<!-- cpt:list:nfr-statements -->
-- Under normal load, workflow start latency p95 MUST be ≤ 100ms from start request to first step scheduling (BR-207)
-- Under normal load, step dispatch latency p95 MUST be ≤ 50ms from step scheduled to execution start (BR-207)
-- Under normal load, monitoring query latency p95 MUST be ≤ 200ms for execution state/history queries (BR-207)
-- Runtime overhead SHOULD be ≤ 10ms per step excluding business logic (BR-207)
-- Execution timeouts per FR-006 (BR-112)
-- The system SHOULD support customizing execution environment settings (time zones, locale, regional compliance) per tenant (BR-117)
-- The system SHOULD support caching of execution results for idempotent operations with configurable TTL to improve performance and reduce redundant processing (BR-118, BR-132)
-<!-- cpt:list:nfr-statements -->
-<!-- cpt:id:nfr -->
-<!-- cpt:###:nfr-title repeat="many" -->
-
-<!-- cpt:###:nfr-title repeat="many" -->
-### Composition Dependencies
-
-<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p2` - **ID**: `cpt-serverless-runtime-nfr-composition-deps`
-
-<!-- cpt:list:nfr-statements -->
-- The system SHOULD support declaring and managing dependencies between workflows/functions to ensure proper deployment order and compatibility (BR-114)
-<!-- cpt:list:nfr-statements -->
-<!-- cpt:id:nfr -->
-<!-- cpt:###:nfr-title repeat="many" -->
-
-<!-- cpt:###:nfr-title repeat="many" -->
-### Scalability
-
-<!-- cpt:id:nfr has="priority,task" covered_by="DESIGN,DECOMPOSITION,SPEC" -->
-- [ ] `p3` - **ID**: `cpt-serverless-runtime-nfr-scalability`
-
-<!-- cpt:list:nfr-statements -->
-- The system SHOULD support ≥ 10,000 concurrent executions per region under normal load (BR-208)
-- The system SHOULD support sustained workflow starts ≥ 1,000/sec per region under normal load (BR-208)
-- The system SHOULD support ≥ 100,000 workflow executions/day initially with a growth plan to ≥ 1,000,000/day (BR-208)
-- The system SHOULD support ≥ 1,000 tenants with a clear partitioning/isolation strategy (BR-208)
-- The system SHOULD support ≥ 10,000 registered workflow definitions across tenants including per-tenant hot-plug (BR-208)
-- The system SHOULD provide stronger isolation boundaries for execution to ensure one tenant's code cannot affect another tenant's environment and resource consumption does not negatively impact other executions (noisy neighbor prevention) (BR-206)
-<!-- cpt:list:nfr-statements -->
-<!-- cpt:id:nfr -->
-<!-- cpt:###:nfr-title repeat="many" -->
-
-<!-- cpt:###:intentional-exclusions -->
-### Intentional Exclusions
-
-<!-- cpt:list:exclusions -->
-- **Usability / UX** (UX-PRD-001, UX-PRD-002, UX-PRD-003, UX-PRD-004, UX-PRD-005): Not applicable — this is a platform runtime capability, not a user-facing application; consumers interact via APIs and programmatic interfaces, not graphical UIs
-- **Visual Workflow Designer UI**: Explicitly out of scope as a future capability; the PRD covers the runtime engine and APIs only
-- **External Marketplace**: Explicitly out of scope; sharing is supported via extensible mechanisms (BR-123) but marketplace is not in scope
-- **Privacy by Design** (SEC-PRD-005): Not directly applicable at the PRD level — the serverless runtime processes tenant automation logic, not end-user PII; data protection controls (BR-017, BR-025) address sensitive data handling within executions
-- **Safety** (SAFE-PRD-001, SAFE-PRD-002): Not applicable — this is a software automation runtime with no physical interaction, medical, or industrial control implications
-<!-- cpt:list:exclusions -->
-<!-- cpt:###:intentional-exclusions -->
-<!-- cpt:##:nfrs -->
-
-<!-- cpt:##:nongoals -->
-## 6. Non-Goals & Risks
-
-<!-- cpt:###:nongoals-title -->
-### Non-Goals
-
-<!-- cpt:list:nongoals -->
-- Visual workflow designer UI (future capability — not part of this PRD)
-- External workflow template marketplace
-- Real-time event streaming infrastructure (assumed to exist as a separate platform capability)
-- Optimizing for short-lived synchronous request/response patterns as the primary/dominant workload (synchronous invocation is supported as a secondary pattern per FR-003)
-<!-- cpt:list:nongoals -->
-<!-- cpt:###:nongoals-title -->
-
-<!-- cpt:###:risks-title -->
-### Risks
-
-<!-- cpt:list:risks -->
-- **Workflow logic complexity**: Authoring and governance may be complex for tenants. Mitigation: definition validation with actionable feedback (FR-001), LLM-manageable definitions (BR-031), visualization (FR-012).
-- **Hot-plug reliability**: Runtime updates must not destabilize ongoing operations. Mitigation: execution isolation during updates (BR-029), versioning (BR-018), blue-green deployment (BR-121).
-- **Security context propagation**: Long-running state must preserve identity reliably. Mitigation: security context availability throughout execution (BR-024), credential refresh (BR-013).
-- **Scheduling scale**: Large numbers of schedules may require careful scaling. Mitigation: per-tenant quotas (BR-106), throttling (BR-113), missed schedule policies (BR-022).
-- **Noisy neighbor**: Multi-tenant runtime must enforce per-tenant limits to prevent impact. Mitigation: resource governance (BR-005, BR-012), stronger isolation boundaries (BR-206).
-- **Sandbox escape / isolation boundary failure**: User-provided code could attempt to break isolation and access host resources or other tenant data. Mitigation: injection prevention (BR-038), privilege escalation prevention (BR-039), resource exhaustion protection (BR-040), stronger isolation (BR-206).
-- **Secret exfiltration**: Workflows/functions could attempt to read or emit secrets via outputs, events, HTTP calls, or logs. Mitigation: secure secrets handling (BR-025), debug view masking (BR-130), data protection controls (BR-017).
-- **Privilege escalation via execution identity**: Misconfiguration of system/user/API-client execution contexts could grant unintended permissions. Mitigation: privilege escalation prevention (BR-039), access control (BR-016).
-<!-- cpt:list:risks -->
-<!-- cpt:###:risks-title -->
-<!-- cpt:##:nongoals -->
-
-<!-- cpt:##:assumptions -->
-## 7. Assumptions & Open Questions
-
-<!-- cpt:###:assumptions-title -->
-### Assumptions
-
-<!-- cpt:list:assumptions -->
-- Platform identity and authorization are available and can be used to determine user/system context. If identity service is unavailable, the serverless runtime cannot start new executions.
-- Event infrastructure exists to deliver event triggers and record lifecycle events. If event infrastructure is degraded, event-triggered workflows will not start but API-triggered and scheduled workflows continue.
-- Persistent storage exists to support durability of execution state. Storage unavailability is a critical dependency that blocks all execution.
-- Scheduling is logically part of the Serverless Runtime but may be implemented as a cooperating internal service with its own persistence and scaling characteristics.
-<!-- cpt:list:assumptions -->
-<!-- cpt:###:assumptions-title -->
-
-<!-- cpt:###:open-questions-title -->
-### Open Questions
-
-<!-- cpt:list:open-questions -->
-- What is the maximum number of concurrent tenants for the initial deployment, and does this require partitioned infrastructure? — Owner: Platform Engineering, Target: DESIGN phase
-- Should scheduled workflows support IANA timezone specifications or UTC-only for schedule definitions? — Owner: Product, Target: DESIGN phase
-<!-- cpt:list:open-questions -->
-<!-- cpt:###:open-questions-title -->
-<!-- cpt:##:assumptions -->
-
-<!-- cpt:##:context -->
-## 8. Additional context
-
-<!-- cpt:###:context-title repeat="many" -->
-### Glossary
-
-<!-- cpt:free:prd-context-notes -->
-| Term | Definition |
-|------|------------|
-| **Workflow** | A durable, resumable process that orchestrates a sequence of steps; maintains state across failures and can run for extended periods (days to years). |
-| **Workflow Definition** | A specification of workflow steps, inputs, outputs, error handling logic, and compensation behavior. |
-| **Workflow Instance** | A single execution of a workflow definition with specific input parameters and state. |
-| **Function** | A single unit of custom logic that can be invoked independently or as part of a workflow. |
-| **Entrypoint** | Unified abstraction for functions and workflows; a registered definition that can be invoked via the runtime API. |
-| **Entrypoint Definition** | Canonical definition for an entrypoint using a GTS-identified JSON Schema with pinned params/returns/errors and traits. |
-| **Invocation Mode** | Execution mode for an entrypoint: `sync` (caller waits for result) or `async` (caller receives an invocation id and polls for status). |
-| **Compensation** | A rollback action that reverses the effect of previously completed steps when a workflow fails (saga pattern). |
-| **Scheduled Workflow** | A workflow that executes on a recurring schedule (periodic/cron-based). |
-| **Infrastructure Adapter** | A modular component that integrates external infrastructure (clouds, on-prem systems) and can provide adapter-specific workflow definitions. |
-| **Hot-Plug** | The ability to register new workflow/function definitions at runtime without system restart. |
-| **Security Context** | Workflow-scoped state containing identity, tenant, and authorization context, preserved throughout workflow execution for communication with platform services. |
-| **Execution** | A running or completed instance of a workflow or function, tracked with a unique invocation ID and correlation ID. |
-| **Saga Pattern** | A distributed transaction pattern where a long-running workflow is broken into steps, each with a compensating action to undo its effects if the workflow fails. |
-| **Tenant Isolation** | Strict separation ensuring one tenant's workflows, executions, and data cannot be accessed by another tenant. |
-| **Durable Execution** | Execution that persists state and survives infrastructure failures, allowing workflows to resume from the last completed step. |
-| **RTO** | Recovery Time Objective — the maximum acceptable time to restore service after a failure. |
-| **RPO** | Recovery Point Objective — the maximum acceptable amount of data loss measured in time. |
-| **TTL** | Time To Live — the duration for which a cached result remains valid before expiring. |
-<!-- cpt:free:prd-context-notes -->
-<!-- cpt:###:context-title repeat="many" -->
-
-<!-- cpt:###:context-title repeat="many" -->
-### Dependencies
-
-<!-- cpt:free:prd-context-notes -->
-| Dependency | Description | Criticality |
-|------------|-------------|-------------|
-| **Identity & Authorization** | Authentication and authorization of workflow operations | P0 |
-| **Event Infrastructure** | Event bus for delivering event triggers and publishing audit/lifecycle events | P0 |
-| **Observability Stack** | Metrics collection, logging, and distributed tracing infrastructure | P0 |
-| **Secret Management** | Secret management service for secure storage and injection of sensitive values | P0 |
-| **Infrastructure Adapter Contract** | Standard interface specification for adapter integration and hot-plug registration | P0 |
-<!-- cpt:free:prd-context-notes -->
-<!-- cpt:###:context-title repeat="many" -->
-
-<!-- cpt:###:context-title repeat="many" -->
-### Target Use Cases
-
-<!-- cpt:free:prd-context-notes -->
-The following business scenarios are the primary motivators for this capability. Each is elaborated as a formal use case in Section 4:
-
-- **Resource provisioning** (UC-001): Multi-step provisioning with rollback on failure
-- **Tenant onboarding** (UC-002): Staged setup, waiting on external approvals/events
-- **Subscription lifecycle** (UC-003): Activation, renewal, suspension, cancellation flows
-- **Billing cycles**: Metering aggregation and invoice preparation workflows
-- **Policy enforcement/remediation** (UC-004): Detect drift and execute corrective actions
-- **Data migration** (UC-007): Long-running copy/checkpoint/resume processes
-- **Disaster recovery orchestration**: Controlled failover/failback sequences
-<!-- cpt:free:prd-context-notes -->
-<!-- cpt:###:context-title repeat="many" -->
-
-<!-- cpt:###:context-title repeat="many" -->
-### BR-to-Cypilot ID Cross-Reference
-
-<!-- cpt:free:prd-context-notes -->
-This PRD was reformatted from the original BR-xxx numbering scheme. The following table maps original BR IDs to Cypilot FR/NFR IDs for traceability:
-
-| Original BR | Cypilot ID | Section |
-|-------------|------------|---------|
-| BR-001, BR-011, BR-018, BR-031, BR-032 | `cpt-serverless-runtime-fr-runtime-authoring` | FR-001 |
-| BR-002, BR-020, BR-036 | `cpt-serverless-runtime-fr-tenant-registry` | FR-002 |
-| BR-003, BR-004, BR-009, BR-010 | `cpt-serverless-runtime-fr-execution-engine` | FR-003 |
-| BR-007, BR-022, BR-110 | `cpt-serverless-runtime-fr-trigger-schedule` | FR-004 |
-| BR-008, BR-035, BR-136 | `cpt-serverless-runtime-fr-runtime-capabilities` | FR-005 |
-| BR-014, BR-019, BR-027, BR-028, BR-029, BR-030, BR-040, BR-108, BR-112 | `cpt-serverless-runtime-fr-execution-lifecycle` | FR-006 |
-| BR-015, BR-128 | `cpt-serverless-runtime-fr-execution-visibility` | FR-007 |
-| BR-037, BR-038, BR-039 | `cpt-serverless-runtime-fr-input-security` | FR-008 |
-| BR-101, BR-102, BR-103, BR-129, BR-130 | `cpt-serverless-runtime-fr-debugging` | FR-009 |
-| BR-104, BR-105, BR-133, BR-134 | `cpt-serverless-runtime-fr-advanced-patterns` | FR-010 |
-| BR-109, BR-122, BR-123 | `cpt-serverless-runtime-fr-governance-sharing` | FR-011 |
-| BR-124, BR-125 | `cpt-serverless-runtime-fr-replay-visualization` | FR-012 |
-| BR-201, BR-202, BR-203, BR-204, BR-205 | `cpt-serverless-runtime-fr-advanced-deployment` | FR-013 |
-| BR-121 | `cpt-serverless-runtime-fr-deployment-safety` | FR-014 |
-| BR-006, BR-013, BR-016, BR-017, BR-023, BR-024, BR-025, BR-033, BR-034, BR-127 | `cpt-serverless-runtime-nfr-security` | NFR Security |
-| BR-005, BR-012, BR-106, BR-113, BR-116 | `cpt-serverless-runtime-nfr-resource-governance` | NFR Resource Governance |
-| BR-026 | `cpt-serverless-runtime-nfr-reliability` | NFR Reliability |
-| BR-021, BR-135 | `cpt-serverless-runtime-nfr-ops-traceability` | NFR Operational Traceability |
-| BR-115, BR-119, BR-120, BR-131 | `cpt-serverless-runtime-nfr-observability` | NFR Observability and Metrics |
-| BR-107, BR-111, BR-126 | `cpt-serverless-runtime-nfr-retention` | NFR Retention |
-| BR-117, BR-118, BR-132, BR-207 | `cpt-serverless-runtime-nfr-performance` | NFR Performance |
-| BR-114 | `cpt-serverless-runtime-nfr-composition-deps` | NFR Composition Dependencies |
-| BR-206, BR-208 | `cpt-serverless-runtime-nfr-scalability` | NFR Scalability |
-<!-- cpt:free:prd-context-notes -->
-<!-- cpt:###:context-title repeat="many" -->
-
-<!-- cpt:###:context-title repeat="many" -->
-### Acceptance Criteria (Business-Level)
-
-<!-- cpt:free:prd-context-notes -->
 **Workflow Execution**:
 - Workflows can be started with inputs and produce a completion outcome (success or failure) with a correlation identifier
 - In-progress workflows resume after a service restart without duplicating completed step side effects
@@ -1146,8 +1095,121 @@ This PRD was reformatted from the original BR-xxx numbering scheme. The followin
 - Operators can view current execution state, history/timeline, and pending work
 - Workflow lifecycle events are captured for audit and compliance
 - Operational metrics exist for volume, latency, and error rates, and can be segmented by tenant
+
+## Dependencies
+
+| Dependency | Description | Criticality |
+|------------|-------------|-------------|
+| **Identity & Authorization** | Authentication and authorization of workflow operations | P0 |
+| **Event Infrastructure** | Event bus for delivering event triggers and publishing audit/lifecycle events | P0 |
+| **Observability Stack** | Metrics collection, logging, and distributed tracing infrastructure | P0 |
+| **Secret Management** | Secret management service for secure storage and injection of sensitive values | P0 |
+| **Infrastructure Adapter Contract** | Standard interface specification for adapter integration and hot-plug registration | P0 |
+
+
+<!-- cpt:##:assumptions -->
+## Assumptions
+
+<!-- cpt:list:assumptions -->
+- Platform identity and authorization are available and can be used to determine user/system context. If identity service is unavailable, the serverless runtime cannot start new executions.
+- Event infrastructure exists to deliver event triggers and record lifecycle events. If event infrastructure is degraded, event-triggered workflows will not start but API-triggered and scheduled workflows continue.
+- Persistent storage exists to support durability of execution state. Storage unavailability is a critical dependency that blocks all execution.
+- Scheduling is logically part of the Serverless Runtime but may be implemented as a cooperating internal service with its own persistence and scaling characteristics.
+<!-- cpt:list:assumptions -->
+<!-- cpt:##:assumptions -->
+
+
+## Risks
+
+<!-- cpt:list:risks -->
+- **Workflow logic complexity**: Authoring and governance may be complex for tenants. Mitigation: definition validation with actionable feedback (FR-001), LLM-manageable definitions (BR-031), visualization (FR-012).
+- **Hot-plug reliability**: Runtime updates must not destabilize ongoing operations. Mitigation: execution isolation during updates (BR-029), versioning (BR-018), blue-green deployment (BR-121).
+- **Security context propagation**: Long-running state must preserve identity reliably. Mitigation: security context availability throughout execution (BR-024), credential refresh (BR-013).
+- **Scheduling scale**: Large numbers of schedules may require careful scaling. Mitigation: per-tenant quotas (BR-106), throttling (BR-113), missed schedule policies (BR-022).
+- **Noisy neighbor**: Multi-tenant runtime must enforce per-tenant limits to prevent impact. Mitigation: resource governance (BR-005, BR-012), stronger isolation boundaries (BR-206).
+- **Sandbox escape / isolation boundary failure**: User-provided code could attempt to break isolation and access host resources or other tenant data. Mitigation: injection prevention (BR-038), privilege escalation prevention (BR-039), resource exhaustion protection (BR-040), stronger isolation (BR-206).
+- **Secret exfiltration**: Workflows/functions could attempt to read or emit secrets via outputs, events, HTTP calls, or logs. Mitigation: secure secrets handling (BR-025), debug view masking (BR-130), data protection controls (BR-017).
+- **Privilege escalation via execution identity**: Misconfiguration of system/user/API-client execution contexts could grant unintended permissions. Mitigation: privilege escalation prevention (BR-039), access control (BR-016).
+<!-- cpt:list:risks -->
+
+
+## Open Questions
+
+<!-- cpt:list:open-questions -->
+- What is the maximum number of concurrent tenants for the initial deployment, and does this require partitioned infrastructure? — Owner: Platform Engineering, Target: DESIGN phase
+- Should scheduled workflows support IANA timezone specifications or UTC-only for schedule definitions? — Owner: Product, Target: DESIGN phase
+<!-- cpt:list:open-questions -->
+
+
+<!-- cpt:##:nongoals -->
+## 6. Non-Goals
+
+<!-- cpt:###:nongoals-title -->
+
+<!-- cpt:list:nongoals -->
+- Visual workflow designer UI (future capability — not part of this PRD)
+- External workflow template marketplace
+- Real-time event streaming infrastructure (assumed to exist as a separate platform capability)
+- Optimizing for short-lived synchronous request/response patterns as the primary/dominant workload (synchronous invocation is supported as a secondary pattern per FR-003)
+<!-- cpt:list:nongoals -->
+<!-- cpt:###:nongoals-title -->
+<!-- cpt:##:nongoals -->
+
+
+<!-- cpt:##:context -->
+## 7. Additional context
+
+<!-- cpt:###:context-title repeat="many" -->
+### Target Use Cases
+
+<!-- cpt:free:prd-context-notes -->
+The following business scenarios are the primary motivators for this capability. Each is elaborated as a formal use case in Section 5:
+
+- **Resource provisioning** (UC-001): Multi-step provisioning with rollback on failure
+- **Tenant onboarding** (UC-002): Staged setup, waiting on external approvals/events
+- **Subscription lifecycle** (UC-003): Activation, renewal, suspension, cancellation flows
+- **Billing cycles**: Metering aggregation and invoice preparation workflows
+- **Policy enforcement/remediation** (UC-004): Detect drift and execute corrective actions
+- **Data migration** (UC-007): Long-running copy/checkpoint/resume processes
+- **Disaster recovery orchestration**: Controlled failover/failback sequences
+<!-- cpt:free:prd-context-notes -->
+<!-- cpt:###:context-title repeat="many" -->
+
+<!-- cpt:###:context-title repeat="many" -->
+### BR-to-Cypilot ID Cross-Reference
+
+<!-- cpt:free:prd-context-notes -->
+This PRD was reformatted from the original BR-xxx numbering scheme. The following table maps original BR IDs to Cypilot FR/NFR IDs for traceability:
+
+| Original BR | Cypilot ID | Section |
+|-------------|------------|---------|
+| BR-001, BR-011, BR-018, BR-031, BR-032 | `cpt-cf-serverless-runtime-fr-runtime-authoring` | FR-001 |
+| BR-002, BR-020, BR-036 | `cpt-cf-serverless-runtime-fr-tenant-registry` | FR-002 |
+| BR-003, BR-004, BR-009, BR-010 | `cpt-cf-serverless-runtime-fr-execution-engine` | FR-003 |
+| BR-007, BR-022, BR-110 | `cpt-cf-serverless-runtime-fr-trigger-schedule` | FR-004 |
+| BR-008, BR-035, BR-136 | `cpt-cf-serverless-runtime-fr-runtime-capabilities` | FR-005 |
+| BR-014, BR-019, BR-027, BR-028, BR-029, BR-030, BR-040, BR-108, BR-112 | `cpt-cf-serverless-runtime-fr-execution-lifecycle` | FR-006 |
+| BR-015, BR-128 | `cpt-cf-serverless-runtime-fr-execution-visibility` | FR-007 |
+| BR-037, BR-038, BR-039 | `cpt-cf-serverless-runtime-fr-input-security` | FR-008 |
+| BR-101, BR-102, BR-103, BR-129, BR-130 | `cpt-cf-serverless-runtime-fr-debugging` | FR-009 |
+| BR-104, BR-105, BR-133, BR-134 | `cpt-cf-serverless-runtime-fr-advanced-patterns` | FR-010 |
+| BR-109, BR-122, BR-123 | `cpt-cf-serverless-runtime-fr-governance-sharing` | FR-011 |
+| BR-124, BR-125 | `cpt-cf-serverless-runtime-fr-replay-visualization` | FR-012 |
+| BR-201, BR-202, BR-203, BR-204, BR-205 | `cpt-cf-serverless-runtime-fr-advanced-deployment` | FR-013 |
+| BR-121 | `cpt-cf-serverless-runtime-fr-deployment-safety` | FR-014 |
+| BR-006, BR-013, BR-016, BR-017, BR-023, BR-024, BR-025, BR-033, BR-034, BR-127 | `cpt-cf-serverless-runtime-nfr-security` | NFR Security |
+| BR-005, BR-012, BR-106, BR-113, BR-116 | `cpt-cf-serverless-runtime-nfr-resource-governance` | NFR Resource Governance |
+| BR-026 | `cpt-cf-serverless-runtime-nfr-reliability` | NFR Reliability |
+| BR-021, BR-135 | `cpt-cf-serverless-runtime-nfr-ops-traceability` | NFR Operational Traceability |
+| BR-115, BR-119, BR-120, BR-131 | `cpt-cf-serverless-runtime-nfr-observability` | NFR Observability and Metrics |
+| BR-107, BR-111, BR-126 | `cpt-cf-serverless-runtime-nfr-retention` | NFR Retention |
+| BR-117, BR-118, BR-132, BR-207 | `cpt-cf-serverless-runtime-nfr-performance` | NFR Performance |
+| BR-114 | `cpt-cf-serverless-runtime-nfr-composition-deps` | NFR Composition Dependencies |
+| BR-208 | `cpt-cf-serverless-runtime-nfr-scalability` | NFR Scalability |
+| BR-206 | `cpt-cf-serverless-runtime-nfr-tenant-isolation` | NFR Tenant Isolation |
 <!-- cpt:free:prd-context-notes -->
 <!-- cpt:###:context-title repeat="many" -->
 
 <!-- cpt:##:context -->
+
 <!-- cpt:#:prd -->

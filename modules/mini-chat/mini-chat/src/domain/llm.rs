@@ -7,6 +7,7 @@
 use modkit_macros::domain_model;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
+use uuid::Uuid;
 
 // ════════════════════════════════════════════════════════════════════════════
 // Message types
@@ -133,9 +134,12 @@ pub enum LlmTool {
     FileSearch {
         vector_store_ids: Vec<String>,
         filters: Option<FileSearchFilter>,
+        max_num_results: Option<u32>,
     },
     /// Server-side web search (provider manages execution).
-    WebSearch,
+    WebSearch {
+        search_context_size: WebSearchContextSize,
+    },
     /// Generic function tool (for providers supporting function calling).
     Function {
         name: String,
@@ -173,6 +177,17 @@ pub struct Citation {
     pub span: Option<TextSpan>,
 }
 
+/// How much context the web search tool should use.
+#[domain_model]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum WebSearchContextSize {
+    #[default]
+    Low,
+    Medium,
+    High,
+}
+
 /// Whether a citation came from a file or web search.
 #[domain_model]
 #[derive(Debug, Clone, Copy, Serialize, ToSchema)]
@@ -188,6 +203,14 @@ pub enum CitationSource {
 pub struct TextSpan {
     pub start: usize,
     pub end: usize,
+}
+
+/// Resolved attachment identity returned by [`build_provider_file_id_map`].
+#[domain_model]
+#[derive(Debug, Clone)]
+pub struct AttachmentRef {
+    pub id: Uuid,
+    pub filename: String,
 }
 
 /// Lifecycle phase of a tool invocation within a stream.

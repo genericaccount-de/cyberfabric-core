@@ -6,6 +6,30 @@ decision-makers: OAGW Team
 
 # Error Source Distinction — Response Header Indicator for Gateway vs Upstream Errors
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+- [Decision Outcome](#decision-outcome)
+  - [Header Values](#header-values)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Response header indicator](#response-header-indicator)
+  - [Wrapped error envelope (opt-in)](#wrapped-error-envelope-opt-in)
+  - [Distinct status code ranges](#distinct-status-code-ranges)
+- [More Information](#more-information)
+- [Appendix A: Detailed Error Response Examples](#appendix-a-detailed-error-response-examples)
+  - [Gateway Error — RFC 9457 Problem Details](#gateway-error--rfc-9457-problem-details)
+  - [Upstream Error — Passthrough](#upstream-error--passthrough)
+  - [X-OAGW-Target-Host Error Examples](#x-oagw-target-host-error-examples)
+- [Links](#links)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-error-source-distinction`
 
 ## Context and Problem Statement

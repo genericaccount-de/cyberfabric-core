@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::domain::model::{PassthroughMode, RequestHeaderRules};
 use http::{HeaderMap, HeaderName, HeaderValue};
 use oagw_sdk::api::ErrorSource;
@@ -160,10 +162,88 @@ pub fn set_host_header(headers: &mut HeaderMap, host: &str, port: u16) {
     }
 }
 
+/// Convert an HTTP `HeaderMap` to a `HashMap<String, String>` for plugin contexts.
+///
+/// Non-UTF-8 header values are silently dropped (they cannot be represented as
+/// `String` and are rare in practice).
+pub fn header_map_to_hash_map(headers: &HeaderMap) -> HashMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_string(), s.to_string()))
+        })
+        .collect()
+}
+
+/// Convert an HTTP `HeaderMap` to a `Vec<(String, String)>` preserving multi-valued headers.
+///
+/// Non-UTF-8 header values are silently dropped (they cannot be represented as
+/// `String` and are rare in practice).
+pub fn header_map_to_vec(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|s| (k.as_str().to_string(), s.to_string()))
+        })
+        .collect()
+}
+
+/// Convert a `Vec<(String, String)>` back to an HTTP `HeaderMap`, preserving multi-values.
+///
+/// Entries with invalid header names or values are logged at `debug` level and
+/// dropped — this can happen when a plugin injects malformed headers.
+pub fn vec_to_header_map(headers: &[(String, String)]) -> HeaderMap {
+    let mut out = HeaderMap::new();
+    for (k, v) in headers {
+        match (
+            HeaderName::from_bytes(k.as_bytes()),
+            HeaderValue::from_str(v),
+        ) {
+            (Ok(name), Ok(val)) => {
+                out.append(name, val);
+            }
+            _ => {
+                tracing::debug!(
+                    header_name = %k,
+                    "plugin-mutated header dropped: invalid name or value"
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Convert a `HashMap<String, String>` back to an HTTP `HeaderMap`.
+///
+/// Entries with invalid header names or values are logged at `debug` level and
+/// dropped — this can happen when a plugin injects malformed headers.
+pub fn hash_map_to_header_map(headers: &HashMap<String, String>) -> HeaderMap {
+    let mut out = HeaderMap::new();
+    for (k, v) in headers {
+        match (
+            HeaderName::from_bytes(k.as_bytes()),
+            HeaderValue::from_str(v),
+        ) {
+            (Ok(name), Ok(val)) => {
+                out.insert(name, val);
+            }
+            _ => {
+                tracing::debug!(
+                    header_name = %k,
+                    "plugin-mutated header dropped: invalid name or value"
+                );
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use super::*;
 
     #[test]

@@ -6,6 +6,47 @@ decision-makers: OAGW Team
 
 # Rate Limiting — Token Bucket with Dual-Rate Configuration and Hierarchical Budget Allocation
 
+
+<!-- toc -->
+
+- [Context and Problem Statement](#context-and-problem-statement)
+- [Decision Drivers](#decision-drivers)
+- [Considered Options](#considered-options)
+  - [Algorithm Comparison](#algorithm-comparison)
+  - [Configuration Options](#configuration-options)
+  - [Hierarchy Options](#hierarchy-options)
+  - [Distribution Options](#distribution-options)
+- [Decision Outcome](#decision-outcome)
+  - [1. Algorithm: Token Bucket (default), Sliding Window (optional)](#1-algorithm-token-bucket-default-sliding-window-optional)
+  - [2. Configuration: Dual-Rate](#2-configuration-dual-rate)
+  - [3. Inheritance: Hierarchical Budget Allocation](#3-inheritance-hierarchical-budget-allocation)
+  - [4. Distribution: Hybrid Local + Periodic Sync](#4-distribution-hybrid-local--periodic-sync)
+  - [Consequences](#consequences)
+  - [Confirmation](#confirmation)
+- [Pros and Cons of the Options](#pros-and-cons-of-the-options)
+  - [Token Bucket algorithm](#token-bucket-algorithm)
+  - [Sliding Window algorithm](#sliding-window-algorithm)
+  - [Flat Configuration (single rate/window)](#flat-configuration-single-ratewindow)
+  - [Dual-Rate Configuration](#dual-rate-configuration)
+  - [Independent Limits (no sharing)](#independent-limits-no-sharing)
+  - [Hierarchical Budget Allocation](#hierarchical-budget-allocation)
+  - [Local-Only distribution](#local-only-distribution)
+  - [Centralized Redis](#centralized-redis)
+  - [Hybrid Local + Periodic Sync](#hybrid-local--periodic-sync)
+- [Schema Changes](#schema-changes)
+  - [Upstream Rate Limit (updated)](#upstream-rate-limit-updated)
+- [Examples](#examples)
+  - [Example 1: System → Partner → Tenant Hierarchy](#example-1-system--partner--tenant-hierarchy)
+  - [Example 2: Shared Pool Among Tenants](#example-2-shared-pool-among-tenants)
+  - [Example 3: Cost-Based Rate Limiting](#example-3-cost-based-rate-limiting)
+- [Implementation Notes](#implementation-notes)
+  - [Token Bucket Algorithm](#token-bucket-algorithm-1)
+  - [Redis Sync Protocol](#redis-sync-protocol)
+- [More Information](#more-information)
+- [Traceability](#traceability)
+
+<!-- /toc -->
+
 **ID**: `cpt-cf-oagw-adr-rate-limiting`
 
 ## Context and Problem Statement

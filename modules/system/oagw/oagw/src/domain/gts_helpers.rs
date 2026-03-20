@@ -32,6 +32,8 @@ pub const OAUTH2_CLIENT_CRED_BASIC_AUTH_PLUGIN_ID: &str =
 // -- Builtin guard plugin instances --
 pub const TIMEOUT_GUARD_PLUGIN_ID: &str = "gts.x.core.oagw.guard_plugin.v1~x.core.oagw.timeout.v1";
 pub const CORS_GUARD_PLUGIN_ID: &str = "gts.x.core.oagw.guard_plugin.v1~x.core.oagw.cors.v1";
+pub const REQUIRED_HEADERS_GUARD_PLUGIN_ID: &str =
+    "gts.x.core.oagw.guard_plugin.v1~x.core.oagw.required_headers.v1";
 
 // -- Builtin transform plugin instances --
 pub const LOGGING_TRANSFORM_PLUGIN_ID: &str =

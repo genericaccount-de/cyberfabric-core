@@ -1,5 +1,33 @@
 # Technical Design — Simple Resource Registry
 
+
+<!-- toc -->
+
+- [1. Architecture Overview](#1-architecture-overview)
+  - [1.1 Architectural Vision](#11-architectural-vision)
+  - [1.2 Architecture Drivers](#12-architecture-drivers)
+  - [1.3 Architecture Layers](#13-architecture-layers)
+- [2. Principles & Constraints](#2-principles--constraints)
+  - [2.1 Design Principles](#21-design-principles)
+  - [2.2 Constraints](#22-constraints)
+- [3. Technical Architecture](#3-technical-architecture)
+  - [3.1 Domain Model](#31-domain-model)
+  - [3.2 Component Model](#32-component-model)
+  - [3.3 API Contracts](#33-api-contracts)
+  - [3.4 Internal Dependencies](#34-internal-dependencies)
+  - [3.5 External Dependencies](#35-external-dependencies)
+  - [3.6 Event and Audit Schemas (`cpt-cf-srr-fr-notification-events`, `cpt-cf-srr-fr-audit-events`)](#36-event-and-audit-schemas-cpt-cf-srr-fr-notification-events-cpt-cf-srr-fr-audit-events)
+  - [3.7 Interactions & Sequences](#37-interactions--sequences)
+  - [3.8 Database Schemas & Tables](#38-database-schemas--tables)
+- [4. Additional Context](#4-additional-context)
+  - [4.1 Known Design-Level Limitations](#41-known-design-level-limitations)
+  - [4.2 Potential Use Cases](#42-potential-use-cases)
+  - [4.3 Storage Routing Configuration (`cpt-cf-srr-fr-storage-routing`)](#43-storage-routing-configuration-cpt-cf-srr-fr-storage-routing)
+  - [4.4 Alignment with Platform Architecture (`docs/arch`) and `gts-rust`](#44-alignment-with-platform-architecture-docsarch-and-gts-rust)
+- [5. Traceability](#5-traceability)
+
+<!-- /toc -->
+
 ## 1. Architecture Overview
 
 ### 1.1 Architectural Vision

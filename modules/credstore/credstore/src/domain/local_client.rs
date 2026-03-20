@@ -57,7 +57,8 @@ mod tests {
     use std::sync::Arc;
 
     use credstore_sdk::{
-        CredStorePluginClientV1, CredStorePluginSpecV1, SecretMetadata, SecretValue, SharingMode,
+        CredStorePluginClientV1, CredStorePluginSpecV1, OwnerId, SecretMetadata, SecretValue,
+        SharingMode, TenantId,
     };
     use modkit::client_hub::{ClientHub, ClientScope};
     use types_registry_sdk::{GtsEntity, TypesRegistryClient};
@@ -132,9 +133,9 @@ mod tests {
     async fn get_trait_impl_returns_some_on_success() {
         let meta = SecretMetadata {
             value: SecretValue::from("val"),
-            owner_id: Uuid::nil(),
+            owner_id: OwnerId::nil(),
             sharing: SharingMode::Tenant,
-            owner_tenant_id: Uuid::nil(),
+            owner_tenant_id: TenantId::nil(),
         };
         let client = make_wired_client(MockPlugin::returns(Some(&meta)));
         let key = SecretRef::new("key").unwrap();

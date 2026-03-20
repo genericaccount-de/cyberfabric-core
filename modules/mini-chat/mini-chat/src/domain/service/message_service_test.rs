@@ -16,7 +16,8 @@ use crate::domain::repos::{
 };
 use crate::domain::service::test_helpers::{
     MockThreadSummaryRepo, inmem_db, mock_db_provider, mock_enforcer, mock_model_resolver,
-    mock_thread_summary_repo, test_security_ctx, test_security_ctx_with_id,
+    mock_tenant_only_enforcer, mock_thread_summary_repo, test_security_ctx,
+    test_security_ctx_with_id,
 };
 use crate::infra::db::entity::attachment::{
     ActiveModel as AttAm, AttachmentKind, AttachmentStatus, Entity as AttEntity,
@@ -63,6 +64,34 @@ fn build_message_service(
         chat_repo,
         reaction_repo,
         mock_enforcer(),
+    )
+}
+
+fn build_message_service_tenant_only_authz(
+    db_provider: Arc<crate::domain::service::DbProvider>,
+    chat_repo: Arc<OrmChatRepository>,
+) -> MessageService<OrmMessageRepository, OrmChatRepository, OrmReactionRepository> {
+    let message_repo = Arc::new(OrmMessageRepository::new(limit_cfg()));
+    let reaction_repo = Arc::new(OrmReactionRepository);
+    MessageService::new(
+        db_provider,
+        message_repo,
+        chat_repo,
+        reaction_repo,
+        mock_tenant_only_enforcer(),
+    )
+}
+
+fn build_chat_service_tenant_only_authz(
+    db_provider: Arc<crate::domain::service::DbProvider>,
+    chat_repo: Arc<OrmChatRepository>,
+) -> ChatService<OrmChatRepository, MockThreadSummaryRepo> {
+    ChatService::new(
+        db_provider,
+        chat_repo,
+        mock_thread_summary_repo(),
+        mock_tenant_only_enforcer(),
+        mock_model_resolver(),
     )
 }
 
@@ -973,5 +1002,51 @@ async fn list_messages_returns_my_reaction() {
         asst_msg.my_reaction,
         Some(ReactionKind::Like),
         "assistant message should have Like reaction"
+    );
+}
+
+// ── Tenant-only AuthZ: user isolation via ensure_owner ──
+
+#[tokio::test]
+async fn list_messages_tenant_only_authz_cross_owner_not_found() {
+    let db = inmem_db().await;
+    let db_provider = mock_db_provider(db);
+    let chat_repo = Arc::new(OrmChatRepository::new(limit_cfg()));
+
+    let tenant_id = Uuid::new_v4();
+    let user_a = Uuid::new_v4();
+    let user_b = Uuid::new_v4();
+    let ctx_a = test_security_ctx_with_id(tenant_id, user_a);
+    let ctx_b = test_security_ctx_with_id(tenant_id, user_b);
+
+    // User A creates a chat via a tenant-only authz chat service
+    let chat_svc =
+        build_chat_service_tenant_only_authz(Arc::clone(&db_provider), Arc::clone(&chat_repo));
+    let chat = chat_svc
+        .create_chat(
+            &ctx_a,
+            NewChat {
+                model: None,
+                title: Some("User A chat".to_owned()),
+                is_temporary: false,
+            },
+        )
+        .await
+        .expect("create_chat failed");
+
+    // User B (same tenant) tries to list messages in User A's chat
+    let msg_svc =
+        build_message_service_tenant_only_authz(Arc::clone(&db_provider), Arc::clone(&chat_repo));
+    let result = msg_svc
+        .list_messages(&ctx_b, chat.id, &ODataQuery::default())
+        .await;
+
+    assert!(
+        result.is_err(),
+        "Cross-owner list_messages must fail with tenant-only authz"
+    );
+    assert!(
+        matches!(result.unwrap_err(), DomainError::ChatNotFound { .. }),
+        "Expected ChatNotFound for cross-owner access with tenant-only authz"
     );
 }

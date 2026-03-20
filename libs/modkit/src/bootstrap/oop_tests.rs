@@ -626,7 +626,7 @@ mod full_oop_config {
                 )]
                 .into(),
             ),
-            tracing: None,
+            opentelemetry: None,
         };
 
         let result = build_oop_config_and_db(&local_config, "test_module", Some(&rendered));
@@ -665,7 +665,7 @@ mod full_oop_config {
                 "another": "setting"
             }),
             logging: None,
-            tracing: None,
+            opentelemetry: None,
         };
 
         let result = build_oop_config_and_db(&local_config, "test_module", Some(&rendered));
@@ -712,7 +712,7 @@ mod full_oop_config {
                 ]
                 .into(),
             ),
-            tracing: None,
+            opentelemetry: None,
         };
 
         let result = build_oop_config_and_db(&local_config, "test_module", Some(&rendered));
@@ -761,7 +761,7 @@ mod full_oop_config {
             database: None,
             config: json!({"master_setting": "value"}),
             logging: None,
-            tracing: None,
+            opentelemetry: None,
         };
 
         let result = build_oop_config_and_db(&local_config, "test_module", Some(&rendered));
@@ -789,7 +789,7 @@ mod full_oop_config {
             database: None,
             config: json!({"master_setting": "value"}),
             logging: None,
-            tracing: None,
+            opentelemetry: None,
         };
 
         let result = build_oop_config_and_db(&local_config, "test_module", Some(&rendered));

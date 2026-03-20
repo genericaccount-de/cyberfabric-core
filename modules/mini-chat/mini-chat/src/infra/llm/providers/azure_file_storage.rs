@@ -59,9 +59,9 @@ impl FileStorageProvider for AzureFileStorage {
         ctx: SecurityContext,
         provider_id: &str,
         params: UploadFileParams,
-    ) -> Result<String, FileStorageError> {
+    ) -> Result<(String, u64), FileStorageError> {
         let uri = self.resolve_uri(&ctx, provider_id, "files")?;
-        self.client.multipart_upload(ctx, &uri, &params).await
+        self.client.multipart_upload(ctx, &uri, params).await
     }
 
     async fn delete_file(

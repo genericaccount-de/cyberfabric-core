@@ -162,6 +162,10 @@ pub struct ResolvedModel {
     pub description: Option<String>,
     pub multimodal_capabilities: Vec<String>,
     pub context_window: u32,
+    /// Per-model upload file size limit in MB, from CCM policy snapshot.
+    /// Used as the provider-side ceiling in two-layer limit resolution
+    /// (`min(ConfigMap, CCM)`).
+    pub max_file_size_mb: u32,
     /// System prompt sent as `instructions` in every LLM request for this model.
     /// Sourced from `ModelCatalogEntry.system_prompt` (per-model, per-policy-version).
     pub system_prompt: String,
@@ -186,6 +190,7 @@ impl From<&mini_chat_sdk::ModelCatalogEntry> for ResolvedModel {
             },
             multimodal_capabilities: e.multimodal_capabilities.clone(),
             context_window: e.context_window,
+            max_file_size_mb: e.general_config.max_file_size_mb,
             system_prompt: e.system_prompt.clone(),
         }
     }

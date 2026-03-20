@@ -1,5 +1,43 @@
 # Feature: Upstream & Route Management
 
+
+<!-- toc -->
+
+- [1. Feature Context](#1-feature-context)
+  - [1.1 Overview](#11-overview)
+  - [1.2 Purpose](#12-purpose)
+  - [1.3 Actors](#13-actors)
+  - [1.4 References](#14-references)
+- [2. Actor Flows (CDSL)](#2-actor-flows-cdsl)
+  - [Create Upstream Flow](#create-upstream-flow)
+  - [Update Upstream Flow](#update-upstream-flow)
+  - [Delete Upstream Flow](#delete-upstream-flow)
+  - [List and Get Upstreams Flow](#list-and-get-upstreams-flow)
+  - [Create Route Flow](#create-route-flow)
+  - [Route Update, Delete, List, and Get Flow](#route-update-delete-list-and-get-flow)
+- [3. Processes / Business Logic (CDSL)](#3-processes--business-logic-cdsl)
+  - [Upstream Validation Algorithm](#upstream-validation-algorithm)
+  - [Alias Enforcement Algorithm](#alias-enforcement-algorithm)
+  - [Route Validation Algorithm](#route-validation-algorithm)
+  - [Enable/Disable Propagation Algorithm](#enabledisable-propagation-algorithm)
+- [4. States (CDSL)](#4-states-cdsl)
+- [5. Definitions of Done](#5-definitions-of-done)
+  - [Implement Upstream CRUD Handlers](#implement-upstream-crud-handlers)
+  - [Implement Route CRUD Handlers](#implement-route-crud-handlers)
+  - [Implement Alias Enforcement and Uniqueness](#implement-alias-enforcement-and-uniqueness)
+  - [Implement Enable/Disable Semantics](#implement-enabledisable-semantics)
+  - [Implement OData Query Support for List Endpoints](#implement-odata-query-support-for-list-endpoints)
+  - [Implement RFC 9457 Error Responses](#implement-rfc-9457-error-responses)
+- [6. Acceptance Criteria](#6-acceptance-criteria)
+- [7. Additional Context](#7-additional-context)
+  - [Performance Considerations](#performance-considerations)
+  - [Security Considerations](#security-considerations)
+  - [Observability Considerations](#observability-considerations)
+  - [Compliance Considerations](#compliance-considerations)
+  - [Accessibility / UX Considerations](#accessibility--ux-considerations)
+
+<!-- /toc -->
+
 - [ ] `p1` - **ID**: `cpt-cf-oagw-featstatus-management-api-implemented`
 
 <!-- reference to DECOMPOSITION entry -->

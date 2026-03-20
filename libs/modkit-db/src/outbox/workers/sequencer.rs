@@ -10,6 +10,7 @@ use super::super::prioritizer::SharedPrioritizer;
 use super::super::taskward::{Directive, WorkerAction};
 use super::super::types::{OutboxError, SequencerConfig};
 use crate::Db;
+use crate::deadlock::is_deadlock;
 
 /// Report emitted by a sequencer execution cycle.
 #[derive(Debug, Clone)]
@@ -40,7 +41,6 @@ pub struct Sequencer {
 struct ClaimedIncoming {
     id: i64,
     body_id: i64,
-    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl Sequencer {
@@ -77,14 +77,15 @@ impl Sequencer {
             let txn = conn.begin().await?;
 
             // Try to acquire row lock
-            if let Some(lock_sql) = dialect.lock_partition()
-                && !self
+            if let Some(lock_sql) = dialect.lock_partition() {
+                let locked = self
                     .try_lock_partition(&txn, backend, partition_id, lock_sql)
-                    .await?
-            {
-                // Rollback (drop txn) and signal skip
-                drop(txn);
-                return Err(PartitionError::Skipped);
+                    .await?;
+                if !locked {
+                    // Rollback (drop txn) and signal skip
+                    drop(txn);
+                    return Err(PartitionError::Skipped);
+                }
             }
 
             // Claim incoming for this partition
@@ -111,14 +112,13 @@ impl Sequencer {
                 .await?;
 
             let outgoing_sql = dialect.build_insert_outgoing_batch(claimed.len());
-            let mut values: Vec<sea_orm::Value> = Vec::with_capacity(claimed.len() * 4);
+            let mut values: Vec<sea_orm::Value> = Vec::with_capacity(claimed.len() * 3);
             for (i, item) in claimed.iter().enumerate() {
                 #[allow(clippy::cast_possible_wrap)]
                 let seq = start_seq + 1 + i as i64;
                 values.push(partition_id.into());
                 values.push(item.body_id.into());
                 values.push(seq.into());
-                values.push(item.created_at.into());
             }
             txn.execute(Statement::from_sql_and_values(
                 backend,
@@ -223,6 +223,22 @@ impl WorkerAction for Sequencer {
                 }))
             }
             Err(PartitionError::Db(e)) => {
+                if matches!(&e, OutboxError::Database(db_err) if is_deadlock(db_err)) {
+                    // MySQL InnoDB deadlock — safe to retry immediately.
+                    // "Always be prepared to re-issue a transaction if it
+                    // fails due to deadlock. Deadlocks are not dangerous.
+                    // Just try again." — MySQL 8.0 Reference Manual
+                    tracing::debug!(
+                        partition_id = pid,
+                        "sequencer: InnoDB deadlock, retrying partition"
+                    );
+                    guard.skipped();
+                    self.shared_prioritizer.push_dirty(pid);
+                    return Ok(Directive::Proceed(SequencerReport {
+                        partition_id: pid,
+                        rows_claimed: 0,
+                    }));
+                }
                 warn!(partition_id = pid, error = %e, "sequencer partition error");
                 guard.error();
                 Ok(Directive::Proceed(SequencerReport {
@@ -268,7 +284,7 @@ impl Sequencer {
     ) -> Result<Vec<ClaimedIncoming>, OutboxError> {
         let claim = dialect.claim_incoming(self.config.batch_size);
 
-        // SELECT id, body_id, created_at ... ORDER BY id
+        // SELECT id, body_id ... ORDER BY id
         let rows = ClaimedIncoming::find_by_statement(Statement::from_sql_and_values(
             backend,
             &claim.select,

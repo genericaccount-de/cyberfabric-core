@@ -194,7 +194,6 @@ fn bench_semaphore_gated(c: &mut Criterion) {
                                     multiplier: 2.0,
                                     jitter: 0.0,
                                 },
-                                steady_pace: Duration::ZERO,
                             },
                         );
 

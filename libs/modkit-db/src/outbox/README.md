@@ -28,7 +28,7 @@ impl MessageHandler for OrderHandler {
 }
 
 let handle = Outbox::builder(db)
-    .poll_interval(Duration::from_millis(100))
+    .profile(OutboxProfile::low_latency())
     .queue("orders", Partitions::of(4))
         .decoupled(OrderHandler)
     .start().await?;
@@ -78,15 +78,10 @@ outbox.enqueue_batch(&txn, "orders", &[
 
 ```rust
 let handle = Outbox::builder(db)
-    .poll_interval(Duration::from_millis(200))
-    .sequencer_batch_size(500)
-    .maintenance(4)
-    .vacuum_cooldown(Duration::from_secs(300))
+    .profile(OutboxProfile::high_throughput())
+    .sequencer_tuning(WorkerTuning::sequencer_high_throughput().batch_size(500))
+    .vacuum_tuning(WorkerTuning::vacuum().idle_interval(Duration::from_secs(300)))
     .queue("orders", Partitions::of(16))
-        .max_concurrent_partitions(8)
-        .msg_batch_size(10)
-        .backoff_base(Duration::from_secs(2))
-        .backoff_max(Duration::from_secs(120))
         .decoupled(OrderHandler)
     .queue("notifications", Partitions::of(4))
         .decoupled_with(NotifyHandler, DecoupledConfig {
