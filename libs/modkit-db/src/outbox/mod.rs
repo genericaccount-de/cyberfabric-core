@@ -115,7 +115,8 @@ pub use handler::{
 pub use manager::{OutboxBuilder, OutboxHandle};
 pub use migrations::outbox_migrations;
 pub use types::{
-    EnqueueMessage, OutboxError, OutboxMessageId, OutboxProfile, Partitions, WorkerTuning,
+    DecoupledConfig, EnqueueMessage, OutboxError, OutboxMessageId, OutboxProfile, Partitions,
+    WorkerTuning,
 };
 
 // Internal re-exports for tests and internal modules

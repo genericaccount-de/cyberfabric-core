@@ -96,23 +96,30 @@ pub trait MiniChatModelPolicyPluginClientV1: Send + Sync {
 #[async_trait]
 pub trait MiniChatAuditPluginClientV1: Send + Sync {
     /// Emit a turn audit event (turn completed or failed).
-    async fn emit_turn_audit(&self, event: TurnAuditEvent) -> Result<(), MiniChatAuditPluginError>;
+    async fn emit_turn_audit(
+        &self,
+        event: TurnAuditEvent,
+        cancel: CancellationToken,
+    ) -> Result<(), MiniChatAuditPluginError>;
 
     /// Emit a turn-retry audit event.
     async fn emit_turn_retry_audit(
         &self,
         event: TurnRetryAuditEvent,
+        cancel: CancellationToken,
     ) -> Result<(), MiniChatAuditPluginError>;
 
     /// Emit a turn-edit audit event.
     async fn emit_turn_edit_audit(
         &self,
         event: TurnEditAuditEvent,
+        cancel: CancellationToken,
     ) -> Result<(), MiniChatAuditPluginError>;
 
     /// Emit a turn-delete audit event.
     async fn emit_turn_delete_audit(
         &self,
         event: TurnDeleteAuditEvent,
+        cancel: CancellationToken,
     ) -> Result<(), MiniChatAuditPluginError>;
 }

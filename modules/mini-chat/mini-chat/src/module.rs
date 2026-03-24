@@ -7,7 +7,9 @@ use mini_chat_sdk::{MiniChatAuditPluginSpecV1, MiniChatModelPolicyPluginSpecV1};
 use modkit::api::OpenApiRegistry;
 use modkit::contracts::RunnableCapability;
 use modkit::{DatabaseCapability, Module, ModuleCtx, RestApiCapability};
-use modkit_db::outbox::{Outbox, OutboxHandle, Partitions};
+use std::time::Duration;
+
+use modkit_db::outbox::{DecoupledConfig, Outbox, OutboxHandle, Partitions};
 use oagw_sdk::ServiceGatewayClientV1;
 use sea_orm_migration::MigrationTrait;
 use tokio_util::sync::CancellationToken;
@@ -190,10 +192,18 @@ impl Module for MiniChatModule {
             .queue(&cleanup_queue_name, partitions)
             .decoupled(AttachmentCleanupHandler)
             .queue(&audit_queue_name, partitions)
-            .decoupled(AuditEventHandler {
-                audit_gateway: Arc::clone(&audit_gateway),
-                metrics: Arc::clone(&metrics),
-            })
+            // Lease must exceed the plugin's worst-case HTTP budget:
+            // request_timeout_secs * (retry_max_retries + 1) + backoff margin.
+            // The plugin config enforces its settings stay within 50 s (LEASE_BUDGET_SECS).
+            .batch_decoupled_with(
+                AuditEventHandler {
+                    audit_gateway: Arc::clone(&audit_gateway),
+                    metrics: Arc::clone(&metrics),
+                },
+                DecoupledConfig {
+                    lease_duration: Duration::from_secs(60),
+                },
+            )
             .start()
             .await
             .map_err(|e| anyhow::anyhow!("outbox start: {e}"))?;
