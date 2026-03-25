@@ -311,7 +311,7 @@ async fn create_dead_letters(
                 partition_id BIGINT NOT NULL,
                 seq          BIGINT NOT NULL,
                 payload      LONGBLOB NOT NULL,
-                payload_type VARCHAR(1024) NOT NULL,
+                payload_type VARCHAR(1024) CHARACTER SET ascii NOT NULL,
                 created_at   TIMESTAMP(6) NOT NULL,
                 failed_at    TIMESTAMP(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
                 last_error   TEXT,
@@ -394,7 +394,7 @@ async fn create_processor(
                 processed_seq BIGINT   NOT NULL DEFAULT 0,
                 attempts      SMALLINT NOT NULL DEFAULT 0,
                 last_error    TEXT,
-                locked_by     VARCHAR(1024),
+                locked_by     VARCHAR(1024) CHARACTER SET ascii,
                 locked_until  TIMESTAMP(6) NULL,
                 FOREIGN KEY (partition_id) REFERENCES modkit_outbox_partitions(id)
             )"
