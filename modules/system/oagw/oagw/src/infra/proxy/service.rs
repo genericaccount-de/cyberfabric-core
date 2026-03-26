@@ -336,6 +336,14 @@ impl DataPlaneService for DataPlaneServiceImpl {
             });
         }
 
+        // Validate Transfer-Encoding — only chunked is supported.
+        if !headers::is_valid_transfer_encoding(&req_headers) {
+            return Err(DomainError::Validation {
+                detail: "unsupported Transfer-Encoding; only chunked is accepted".into(),
+                instance: instance_uri,
+            });
+        }
+
         // Conditional body conversion — keep streams for streaming request bodies.
         let max_body = self.max_body_size;
         let (body_bytes, body_stream): (Bytes, Option<BodyStream>) = match body {

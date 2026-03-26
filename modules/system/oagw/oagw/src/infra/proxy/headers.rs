@@ -190,17 +190,37 @@ pub fn apply_response_header_rules(headers: &mut HeaderMap, rules: &ResponseHead
 }
 
 /// Returns `true` if the Content-Type header (when present) is a valid MIME type.
-/// Returns `false` if the value is not valid UTF-8 or cannot be parsed as a MIME type.
-/// Returns `true` if the header is absent (nothing to validate).
+/// Returns `false` if duplicates exist, the value is not valid UTF-8, or it
+/// cannot be parsed as a MIME type. Returns `true` if the header is absent.
 pub fn is_valid_content_type(headers: &HeaderMap) -> bool {
-    match headers.get(http::header::CONTENT_TYPE) {
-        None => true,
-        Some(ct) => ct
-            .to_str()
-            .ok()
-            .and_then(|v| v.parse::<mime::Mime>().ok())
-            .is_some(),
+    let mut iter = headers.get_all(http::header::CONTENT_TYPE).iter();
+    let Some(ct) = iter.next() else {
+        return true;
+    };
+    // Reject duplicate Content-Type headers.
+    if iter.next().is_some() {
+        return false;
     }
+    ct.to_str()
+        .ok()
+        .and_then(|v| v.parse::<mime::Mime>().ok())
+        .is_some()
+}
+
+/// Returns `true` if the Transfer-Encoding header is absent or exactly `chunked`.
+/// Returns `false` for duplicates or any encoding other than `chunked`.
+pub fn is_valid_transfer_encoding(headers: &HeaderMap) -> bool {
+    let mut iter = headers.get_all(http::header::TRANSFER_ENCODING).iter();
+    let Some(val) = iter.next() else {
+        return true;
+    };
+    // Reject duplicate Transfer-Encoding headers (HTTP smuggling vector).
+    if iter.next().is_some() {
+        return false;
+    }
+    val.to_str()
+        .ok()
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case("chunked"))
 }
 
 /// Set the Host header to match the upstream endpoint.
@@ -668,5 +688,55 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("content-type", "not a valid mime type!!!".parse().unwrap());
         assert!(!is_valid_content_type(&headers));
+    }
+
+    #[test]
+    fn transfer_encoding_absent_is_valid() {
+        let headers = HeaderMap::new();
+        assert!(is_valid_transfer_encoding(&headers));
+    }
+
+    #[test]
+    fn transfer_encoding_chunked_is_valid() {
+        let mut headers = HeaderMap::new();
+        headers.insert("transfer-encoding", "chunked".parse().unwrap());
+        assert!(is_valid_transfer_encoding(&headers));
+    }
+
+    #[test]
+    fn transfer_encoding_chunked_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert("transfer-encoding", "Chunked".parse().unwrap());
+        assert!(is_valid_transfer_encoding(&headers));
+    }
+
+    #[test]
+    fn transfer_encoding_gzip_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert("transfer-encoding", "gzip".parse().unwrap());
+        assert!(!is_valid_transfer_encoding(&headers));
+    }
+
+    #[test]
+    fn transfer_encoding_mixed_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.insert("transfer-encoding", "gzip, chunked".parse().unwrap());
+        assert!(!is_valid_transfer_encoding(&headers));
+    }
+
+    #[test]
+    fn duplicate_content_type_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.append("content-type", "application/json".parse().unwrap());
+        headers.append("content-type", "text/html".parse().unwrap());
+        assert!(!is_valid_content_type(&headers));
+    }
+
+    #[test]
+    fn duplicate_transfer_encoding_rejected() {
+        let mut headers = HeaderMap::new();
+        headers.append("transfer-encoding", "chunked".parse().unwrap());
+        headers.append("transfer-encoding", "chunked".parse().unwrap());
+        assert!(!is_valid_transfer_encoding(&headers));
     }
 }
